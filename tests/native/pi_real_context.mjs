@@ -1,0 +1,58 @@
+/** Real deployment CLI + installed Pi SDK + built-in MCP; never prompt a model. */
+import assert from "node:assert/strict";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
+const options = JSON.parse(await readFile(process.argv[2], "utf8"));
+process.env.PI_CODING_AGENT_DIR = options.agentDir;
+const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
+  await import(pathToFileURL(join(options.sdkRoot, "dist/index.js")).href);
+const { createMcpExtension } = await import(pathToFileURL(join(options.sdkRoot, "dist/extensions/mcp/index.js")).href);
+const { convertToLlm } = await import(pathToFileURL(join(options.sdkRoot, "dist/core/messages.js")).href);
+await mkdir(options.agentDir, { recursive: true });
+await writeFile(join(options.agentDir, "mcp.json"), JSON.stringify({ mcpServers: { shared_memory: {
+  command: options.cli, args: ["--root", options.root, "serve"], exposure: "direct", timeout: 15,
+} } }));
+const wrapper = join(options.agentDir, "shared-memory.ts");
+await writeFile(wrapper, `import {createSharedMemoryExtension} from ${JSON.stringify(options.extension)};\n`
+  + `export default createSharedMemoryExtension(${JSON.stringify({ root: options.root, cli: options.cli })});\n`);
+const settingsManager = SettingsManager.inMemory({ packages: [], extensions: [], autoEnableCodemode: false });
+const loader = new DefaultResourceLoader({ cwd: options.project, agentDir: options.agentDir, settingsManager,
+  additionalExtensionPaths: [wrapper], extensionFactories: [{ name: "installed-mcp", factory: createMcpExtension() }],
+  noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
+await loader.reload();
+assert.deepEqual(loader.getExtensions().errors, []);
+const modelRuntime = await ModelRuntime.create({ authPath: join(options.agentDir, "auth.json"), modelsPath: null,
+  allowModelNetwork: false, refreshOnCreate: false });
+const manager = SessionManager.inMemory(options.project);
+const { session } = await createAgentSession({ cwd: options.project, agentDir: options.agentDir, settingsManager,
+  sessionManager: manager, resourceLoader: loader, modelRuntime, noTools: true });
+try {
+  const errors = [];
+  await session.bindExtensions({ mode: "json", onError: (error) => errors.push(error) });
+  const user = { role: "user", content: "Synthetic startup probe", timestamp: 1 };
+  const first = await session.extensionRunner.emitContext([user]);
+  const memory = first.filter((message) => message.customType === "shared-memory-context");
+  assert.equal(memory.length, 1);
+  assert.ok(memory[0].content.includes(options.sentinel));
+  assert.ok(memory[0].content.includes(options.id));
+  assert.ok(Array.from(memory[0].content).length <= 6000);
+  assert.ok(convertToLlm(first).some((message) => JSON.stringify(message.content).includes(options.sentinel)));
+  // Repeated request context must replace one message without reconnecting MCP.
+  const replaced = await session.extensionRunner.emitContext(first);
+  assert.equal(replaced.filter((message) => message.customType === "shared-memory-context").length, 1);
+  // Dispatch the real startup wait boundary without launching agent.prompt or a provider.
+  await session.extensionRunner.emitBeforeAgentStart("Synthetic startup probe", undefined, { sections: {} });
+  const names = session.getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("mcp__shared_memory__"));
+  assert.equal(names.length, 6);
+  assert.deepEqual(errors, []);
+  assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"));
+  console.log(JSON.stringify({ status: "pass", actual_cli: options.cli, installed_sdk: options.sdkRoot,
+    sentinel_present: true, record_id_present: true, text_chars: Array.from(memory[0].content).length,
+    shared_memory_messages: 1, mcp_tools: names, model_calls: 0, provider_calls: 0,
+    boundary: "installed loader/session/event dispatch, real CLI context, real built-in MCP stdio connection, convertToLlm" }));
+} finally {
+  await session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
+  session.dispose();
+}
