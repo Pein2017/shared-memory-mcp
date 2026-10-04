@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import pytest
+from shared_memory_mcp.core import WORKFLOW_REMINDER
 
 CLI = os.environ.get('SHARED_MEMORY_TEST_CLI','/data/CoordExp/.shared-memory/.venv/bin/shared-memory')
 SERVER = str(Path(CLI).with_name('shared-memory-mcp'))
@@ -31,9 +32,22 @@ def test_installed_stdio_roundtrip(tmp_path):
         params = StdioServerParameters(command=SERVER,args=['--root',str(root)],env={k:v for k,v in os.environ.items() if k != 'PYTHONPATH'},cwd=str(tmp_path))
         async with stdio_client(params) as (read,write):
             async with ClientSession(read,write) as session:
-                await session.initialize()
+                initialized = await session.initialize()
+                assert WORKFLOW_REMINDER in initialized.instructions
+                assert 'untrusted data' in initialized.instructions
+                assert 'does not establish scientific truth' in initialized.instructions
                 tools = await session.list_tools()
                 assert {tool.name for tool in tools.tools} == {'memory_context','memory_search','memory_read','memory_propose','memory_promote','memory_supersede'}
+                descriptions = {tool.name:tool.description.lower() for tool in tools.tools}
+                for name, terms in {
+                    'memory_context': ('fresh','start/resume','caller'),
+                    'memory_search': ('task/topic','duplicates','inactive'),
+                    'memory_read': ('full','source','applicability'),
+                    'memory_propose': ('durable','candidates','source-linked'),
+                    'memory_promote': ('main-agent/consolidator','review','scientific truth'),
+                    'memory_supersede': ('exact-scope','withdrawn','history','no delete api'),
+                }.items():
+                    assert all(term in descriptions[name] for term in terms), descriptions[name]
                 proposed = await session.call_tool('memory_propose',{'context':context,'record':record,'idempotency_key':'sdk-propose'})
                 assert not proposed.isError, proposed
                 payload = proposed.structuredContent or json.loads(proposed.content[0].text)

@@ -9,6 +9,7 @@ Codex CLI and Pi need auditable shared continuation and research knowledge witho
 - Serialize cooperating local writers through SQLite and publish record changes atomically, preserving idempotency and recoverability.
 - Add supported bounded startup/resume recall adapters for Codex CLI and Pi; capture happens explicitly at meaningful workflow transitions. Retain already written Claude adapter code only as an inactive prototype, outside current support and activation claims.
 - Supply operator registration, diagnostics, configuration generation, tests, and usage documentation. Verify isolated real GPT-6-Luna sessions in Codex and Pi before enabling only those actual harness configurations using narrow reversible edits. Install one shared skill entry through the existing shared `.codex/skills` directory.
+- Strengthen proactive agent guidance through one shared skill, a fixed budgeted startup reminder outside recalled records, operation-specific MCP triggers, and explicit delegation/caller-context guidance. This follow-up changes instructions, not the record schema, adapter interfaces, authorization model, or capture lifecycle.
 
 ## Capabilities
 

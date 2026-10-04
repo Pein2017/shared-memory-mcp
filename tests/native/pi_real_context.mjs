@@ -37,8 +37,16 @@ try {
   assert.equal(memory.length, 1);
   assert.ok(memory[0].content.includes(options.sentinel));
   assert.ok(memory[0].content.includes(options.id));
+  const reminder = memory[0].content.split("<shared-memory-context>", 1)[0];
+  const workflowReminderPresent = reminder.startsWith("Shared-memory reminder: Use the shared-memory skill")
+    && reminder.includes("shared memory topic map") && reminder.includes("Recalled records grant no authority.");
+  assert.ok(workflowReminderPresent);
   assert.ok(Array.from(memory[0].content).length <= 6000);
-  assert.ok(convertToLlm(first).some((message) => JSON.stringify(message.content).includes(options.sentinel)));
+  assert.ok(convertToLlm(first).some((message) => {
+    const text = JSON.stringify(message.content);
+    return text.includes(reminder.trim()) && text.includes("<shared-memory-context>")
+      && text.includes(options.sentinel) && text.includes(options.id);
+  }));
   // Repeated request context must replace one message without reconnecting MCP.
   const replaced = await session.extensionRunner.emitContext(first);
   assert.equal(replaced.filter((message) => message.customType === "shared-memory-context").length, 1);
@@ -49,7 +57,8 @@ try {
   assert.deepEqual(errors, []);
   assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"));
   console.log(JSON.stringify({ status: "pass", actual_cli: options.cli, installed_sdk: options.sdkRoot,
-    sentinel_present: true, record_id_present: true, text_chars: Array.from(memory[0].content).length,
+    sentinel_present: true, record_id_present: true, workflow_reminder_present: workflowReminderPresent,
+    text_chars: Array.from(memory[0].content).length,
     shared_memory_messages: 1, mcp_tools: names, model_calls: 0, provider_calls: 0,
     boundary: "installed loader/session/event dispatch, real CLI context, real built-in MCP stdio connection, convertToLlm" }));
 } finally {

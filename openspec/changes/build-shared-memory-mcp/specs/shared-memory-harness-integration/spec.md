@@ -40,6 +40,21 @@ Lifecycle adapters SHALL perform recall without automatic transcript/tool extrac
 - **WHEN** a harness executes routine tools without an explicit propose call
 - **THEN** no canonical shared record is created
 
+### Requirement: Proactive shared workflow guidance
+Successful context output SHALL include a fixed source-owned workflow reminder outside the untrusted recalled-record wrapper and within the existing total character budget, even when a registered project has no matching active records. The shared skill SHALL own proactive task/topic retrieval, meaningful candidate capture, reviewed correction, and delegation guidance. MCP initialization and tool descriptions SHALL provide the workflow entry and operation-specific usage triggers without promising automatic model compliance or server-enforced review roles. Recalled records SHALL NOT supply the operational reminder.
+
+#### Scenario: Empty registered project
+- **WHEN** a registered project has no active memory matches
+- **THEN** its valid bounded context still exposes the shared workflow entry and the actual current caller context without creating records
+
+#### Scenario: Required view exceeds budget
+- **WHEN** a supported character budget cannot hold the reminder and complete scope/caller wrapper
+- **THEN** context returns empty text with a diagnostic instead of exceeding the budget or truncating required metadata
+
+#### Scenario: Delegated worker lacks its own native context
+- **WHEN** a worker inherits a parent view but has no actual caller context of its own
+- **THEN** guidance directs it to return source-linked candidate content to the lead rather than invent an identity or submit under the parent's session
+
 ### Requirement: Graceful unavailability with closed scope
 An unavailable or unconfigured memory store SHALL NOT prevent ordinary harness use. A lifecycle adapter SHALL emit empty recall and a bounded diagnostic on scope/store failure; it SHALL NOT inject another project's content as fallback. MCP operations SHALL expose actionable errors.
 

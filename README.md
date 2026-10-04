@@ -69,6 +69,10 @@ Claude installation preserves its default model, native-memory settings, other h
 
 Startup recall supplies a bounded `<shared-memory-context>` view with actual `caller_context`. Supply that context to MCP tools rather than inventing a session ID or using the server cwd.
 
+A fixed source-owned reminder precedes the recalled-record wrapper and shares its total character budget. It is delivered even when a registered project has no matching active records; scope failures still inject nothing. It points to the single [shared-memory skill](skills/shared-memory/SKILL.md), which owns proactive task/topic retrieval, semantic candidate capture and reviewed corrections. For project navigation, query `shared memory topic map` when one exists; default startup ranking does not prioritize that record automatically.
+
+MCP initialization and operation descriptions expose the workflow entry and use triggers. Delegation briefs identify recall/capture duties and the designated consolidator. A worker without its own native caller context returns source-linked candidate content to the lead rather than copying the parent's identity. These instructions improve discovery and deterministic delivery; they cannot guarantee model compliance or enforce reviewer roles.
+
 | Tool | Purpose |
 | --- | --- |
 | `memory_context` | Fresh bounded startup/task view |
@@ -119,6 +123,7 @@ Track canonical files and registry configuration with Git if desired. Git is use
 - Provenance and review references are self-reported cooperating-agent metadata. Source validation is syntactic; semantic review remains the agent/user owner's responsibility.
 - Claude/Codex startup/resume/clear/compact hooks append bounded current snapshots. They cannot erase earlier conversation history or compacted summaries. Pi replaces its owned context message. Real-model resume/compaction and Claude fork sessions remain unmeasured; event envelopes are source/fixture checked.
 - Lifecycle hooks perform recall only. No guaranteed transcript distillation, automatic scientific consolidation, time-based truth decay, or physical deletion is provided.
+- The fixed workflow reminder consumes part of the existing startup budget. If a supported small budget cannot hold the complete reminder and required scope/caller wrapper, context returns an empty diagnostic view. Reminder delivery does not establish that a model followed it or used every relevant record.
 
 ## Diagnostics and rollback
 

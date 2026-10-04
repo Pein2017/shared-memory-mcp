@@ -18,6 +18,9 @@ const fixtureCli = join(scratch, "context-fixture.mjs");
 const response = join(scratch, "response.json");
 const calls = join(scratch, "calls.jsonl");
 const wrapper = join(scratch, "configured-memory.ts");
+const reminder = "Shared-memory reminder: fixture workflow guidance.\n";
+const firstText = reminder + "<shared-memory-context>first</shared-memory-context>";
+const currentText = reminder + "<shared-memory-context>current</shared-memory-context>";
 let session;
 try {
   await mkdir(project);
@@ -29,7 +32,7 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   delete process.env.SHARED_MEMORY_ROOT;
   await writeFile(wrapper, `import {createSharedMemoryExtension} from ${JSON.stringify(extension)};\n`
     + `export default createSharedMemoryExtension(${JSON.stringify({ root: scratch, cli: fixtureCli })});\n`);
-  await writeFile(response, JSON.stringify({ status: "ok", text: "<shared-memory-context>first</shared-memory-context>" }));
+  await writeFile(response, JSON.stringify({ status: "ok", text: firstText }));
   const settingsManager = SettingsManager.inMemory({ packages: [], extensions: [] });
   const loader = new DefaultResourceLoader({ cwd: project, agentDir, settingsManager,
     additionalExtensionPaths: [wrapper], noExtensions: true, noSkills: true,
@@ -48,14 +51,14 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   const user = { role: "user", content: "host user", timestamp: 2 };
   let messages = await session.extensionRunner.emitContext([user, stale, stale]);
   assert.equal(messages.length, 2);
-  assert.equal(messages[1].content, "<shared-memory-context>first</shared-memory-context>");
+  assert.equal(messages[1].content, firstText);
   messages = await session.extensionRunner.emitContext(messages);
   assert.equal(messages.filter((m) => m.customType === "shared-memory-context").length, 1);
-  assert.ok(convertToLlm(messages).some((m) => JSON.stringify(m.content).includes("first")));
-  await writeFile(response, JSON.stringify({ status: "ok", text: "<shared-memory-context>current</shared-memory-context>" }));
+  assert.ok(convertToLlm(messages).some((m) => JSON.stringify(m.content).includes(firstText.replace(/\n/g, "\\n"))));
+  await writeFile(response, JSON.stringify({ status: "ok", text: currentText }));
   await session.extensionRunner.emit({ type: "session_start", reason: "resume" });
   messages = await session.extensionRunner.emitContext(messages);
-  assert.equal(messages[1].content, "<shared-memory-context>current</shared-memory-context>");
+  assert.equal(messages[1].content, currentText);
   await session.extensionRunner.emit({ type: "session_compact", reason: "manual", willRetry: false,
     fromExtension: false, compactionEntry: { id: "fixture-compaction" } });
   messages = await session.extensionRunner.emitContext(messages);
@@ -71,7 +74,7 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
   messages = await session.extensionRunner.emitContext(messages);
   assert.deepEqual(messages, [user], "invalid transport clears old recall");
-  await writeFile(response, JSON.stringify({ status: "ok", text: "x".repeat(6001) }));
+  await writeFile(response, JSON.stringify({ status: "ok", text: reminder + "x".repeat(6001 - reminder.length) }));
   await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
   assert.deepEqual(await session.extensionRunner.emitContext(messages), [user]);
   await writeFile(response, JSON.stringify({ status: "unmapped", text: "must not be injected" }));

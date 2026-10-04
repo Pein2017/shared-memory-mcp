@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import uuid
+from shared_memory_mcp.core import WORKFLOW_REMINDER
 
 PACKAGE = Path(__file__).resolve().parents[1]
 CLI = '/data/CoordExp/.shared-memory/.venv/bin/shared-memory'
@@ -104,12 +105,20 @@ class Provider:
                 for item in additional:
                     walk(item.get('tools',[]))
                 callers = []
+                workflow_reminder_present = False
                 def find_callers(value):
+                    nonlocal workflow_reminder_present
                     if isinstance(value,dict):
+                        if value.get('type')=='additional_tools':
+                            return
                         for nested in value.values(): find_callers(nested)
                     elif isinstance(value,list):
                         for nested in value: find_callers(nested)
                     elif isinstance(value,str):
+                        for snapshot in value.split(WORKFLOW_REMINDER+'\n<shared-memory-context>')[1:]:
+                            records = snapshot.split('</shared-memory-context>',1)[0]
+                            if owner.sentinel in records and owner.identifier in records:
+                                workflow_reminder_present = True
                         for match in re.finditer(r'caller_context: (\{[^\n]+\})',value):
                             try: caller = json.loads(match.group(1))
                             except ValueError: continue
@@ -121,6 +130,7 @@ class Provider:
                     'model':body.get('model'), 'effort_fields_present':any(key in raw for key in ('"effort"','"reasoning_effort"')),
                     'body_bytes':size,'sentinel_present':owner.sentinel in raw,
                     'record_id_present':owner.identifier in raw,'context_wrapper_present':'shared-memory-context' in raw,
+                    'workflow_reminder_present':workflow_reminder_present,
                     'memory_tools':sorted(set(tools)), 'tool_names':sorted(set(tool_names)),
                     'memory_schema_tools':sorted(set(schema_tools)),
                     'tool_types':sorted(set(tool_types)),
@@ -214,7 +224,8 @@ def summarize(result, requests, receipt, harness, cwd):
     result.update(events=events[-30:],provider_requests=requests,
                   native_hook_receipts=[json.loads(raw) for raw in receipt.read_text().splitlines()] if receipt.exists() else [],
                   real_provider_requests=0,model_inference_calls=0)
-    matching = [request for request in requests if request['sentinel_present'] and request['record_id_present']]
+    matching = [request for request in requests if request['sentinel_present'] and request['record_id_present']
+                and request.get('workflow_reminder_present',False)]
     names = {name.rsplit('__',1)[-1] for request in matching for name in request['memory_tools']}
     verified_receipts = [entry for entry in result['native_hook_receipts'] if entry['exit_code']==0 and entry['sentinel_present'] and entry['record_id_present']
                      and entry['text_chars']<=6000 and entry.get('hook_event_name')=='SessionStart'

@@ -26,6 +26,13 @@
 - [x] 4.3 Verify fresh actual configured Codex/Pi sessions consume the bounded shared-memory view and support shared read/write; report any unsupported or unmeasured supported native path explicitly rather than substituting a mock pass. Do not claim Claude support from retained prototype evidence.
 - [x] 4.4 Complete user-facing setup, record format, lifecycle, portability, concurrency, troubleshooting, and rollback documentation; verify OpenSpec strict validation and a final owned-change inventory, then report package evidence for lead acceptance without self-granting it.
 
+## 5. Proactive guidance follow-up
+
+- [x] 5.1 Update the single shared skill with proactive recall/capture/correction triggers, current-view freshness, and the delegated-worker context fallback; add only a pointer and briefing duty at the local native-team guidance owner.
+- [x] 5.2 Add one fixed source-owned reminder before untrusted recalled records in the common context text and MCP initialization, preserving the existing total budget, caller provenance, whole-record omission and empty scope-failure behavior.
+- [x] 5.3 Add operation-specific MCP usage triggers and update usage documentation without adding background capture, role ACLs, deletion tools or storage/ranking changes.
+- [x] 5.4 Verify reminder/data separation, supported-budget rejection, no capture on recall, official SDK metadata, and installed Claude/Codex/Pi serialized startup delivery without model inference; validate the changed skills and OpenSpec artifacts and retain bounded qualification evidence.
+
 ## Completion evidence and limits
 
 - Package consumer/SDK suite: 47 passed, exit 0. Independent lead counterexamples confirmed collision rejection, subdirectory isolation, and bounded large-body search.
@@ -35,3 +42,9 @@
 - Current wheel installed outside the checkout and exercised the standard-library core with MCP import blocked. OpenSpec strict validation and explicit source inventory complete the local acceptance record.
 - Native resume/compaction event contracts are covered by fixtures and same-version source; additional real-model resume/compaction sessions were not exercised. Codex cannot erase memory from prior history/compacted summaries. Claude remains excluded.
 - Raw local qualification receipts are retained under ignored `outputs/`; they are implementation evidence, not research records or portable source assets.
+
+## Proactive guidance follow-up acceptance (2026-10-04)
+
+- A focused pre-change failure reproduced the missing startup reminder. The current package suite passed 62 tests, including the reminder/data boundary, whole-record Unicode budgeting, empty scope failure, native observable negative controls, and official SDK initialization/tool metadata. Both changed skills passed skill-creator validation; installed Pi forwarding checks passed without model calls.
+- The lead accepted one isolated installed Codex/Claude/Pi startup probe, exit 0. The reminder and corresponding record were present in the same serialized startup view, actual native caller identity was verified, and all views stayed within 6000 characters. Claude/Codex native exit 1 is the expected local HTTP 400 rejection before inference; Pi used its installed session/extension/MCP path. This follow-up made zero real-provider or model-inference calls. Claude's prior activation and model qualification remain owned by `qualify-claude-haiku`.
+- Qualification receipts are retained at `/data/CoordExp/.shared-memory/.state/qualifications/2026-10-04T080852Z-proactive-guidance/`. The production topic-map readback passed and doctor still reported 51 CoordExp records and zero shared-memory-mcp records. Guidance delivery does not prove model compliance or enforce consolidator permissions; active MCP processes may need a fresh connection to load updated instructions and descriptions.

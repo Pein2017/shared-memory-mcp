@@ -94,7 +94,7 @@ class HookAdaptersTest(unittest.TestCase):
         self.assertEqual(errors.getvalue(), "")
 
     def test_hooks_deliver_the_exact_shared_core_bounded_snapshot(self):
-        from shared_memory_mcp.core import MemoryStore
+        from shared_memory_mcp.core import MemoryStore, WORKFLOW_REMINDER
         with tempfile.TemporaryDirectory(prefix="shared-memory-hook-") as scratch:
             project = Path(scratch) / "actual-project"
             project.mkdir()
@@ -108,12 +108,15 @@ class HookAdaptersTest(unittest.TestCase):
             store.promote(caller, proposed["record"]["id"],
                           {"reason": "Isolated fixture review", "evidence": [{"uri": "file:///fixture/owner.md"}]},
                           "fixture-review")
-            expected = store.context(caller)
             event = self.event(cwd=str(project))
-            output = handle_hook(store, "claude", event)
-            self.assertEqual(output["hookSpecificOutput"]["additionalContext"], expected["text"])
-            self.assertEqual(len(expected["items"]), 1)
-            self.assertLessEqual(len(expected["text"]), 6000)
+            for harness in ("claude", "codex"):
+                with self.subTest(harness=harness):
+                    expected = store.context({**caller, "harness": harness, "actor": harness})
+                    output = handle_hook(store, harness, event)
+                    self.assertEqual(output["hookSpecificOutput"]["additionalContext"], expected["text"])
+                    self.assertTrue(expected["text"].startswith(WORKFLOW_REMINDER + "\n<shared-memory-context>"))
+                    self.assertEqual(len(expected["items"]), 1)
+                    self.assertLessEqual(len(expected["text"]), 6000)
 
 
 class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
@@ -123,7 +126,7 @@ class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
         probe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(probe)
         caller = {"cwd": "/actual/project", "session_id": "native-session", "harness": "claude", "actor": "claude"}
-        request = {"sentinel_present": True, "record_id_present": True, "model": probe.CLAUDE_MODEL,
+        request = {"sentinel_present": True, "record_id_present": True, "workflow_reminder_present": True, "model": probe.CLAUDE_MODEL,
                    "memory_tools": ["mcp__shared-memory__" + name for name in probe.TOOLS],
                    "memory_schema_tools": ["mcp__shared-memory__" + name for name in probe.TOOLS],
                    "effort_fields_present": False, "caller_contexts": [caller]}
@@ -138,7 +141,7 @@ class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
                 return probe.summarize(copy.deepcopy(actual_result), [actual_request], receipt_path,
                                        "claude", caller["cwd"])["status"]
             self.assertEqual(status(), "pass")
-            for changed in ({"model": "other"}, {"memory_schema_tools": []}, {"effort_fields_present": True},
+            for changed in ({"workflow_reminder_present": False}, {"model": "other"}, {"memory_schema_tools": []}, {"effort_fields_present": True},
                             {"caller_contexts": [{**caller, "session_id": "invented"}]},
                             {"caller_contexts": [{**caller, "actor": "fixture"}]}):
                 with self.subTest(changed=changed):
@@ -146,6 +149,34 @@ class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
             self.assertEqual(status(actual_result={**result, "exit_code": 0}), "limit")
             receipt_path.write_text(json.dumps({**receipt, "cwd": "/other/project"}) + "\n")
             self.assertEqual(status(), "limit")
+
+    def test_native_reminder_observable_requires_the_same_startup_text(self):
+        from urllib.error import HTTPError
+        from urllib.request import Request, urlopen
+        path = Path(__file__).with_name("native_startup_probe.py")
+        spec = importlib.util.spec_from_file_location("native_probe_reminder_fixture", path)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        wrapper = '<shared-memory-context>SENTINEL RECORD_ID</shared-memory-context>'
+        provider = probe.Provider('SENTINEL', 'RECORD_ID')
+        try:
+            for body, expected in (
+                ({"messages": [{"content": probe.WORKFLOW_REMINDER + '\n' + wrapper}]}, True),
+                ({"tools": [{"description": probe.WORKFLOW_REMINDER}], "messages": [{"content": wrapper}]}, False),
+                ({"input": [{"type": "additional_tools", "tools": [{"description": probe.WORKFLOW_REMINDER + '\n' + wrapper}]}]}, False),
+                ({"messages": [{"content": probe.WORKFLOW_REMINDER}, {"content": wrapper}]}, False),
+                ({"messages": [{"content": probe.WORKFLOW_REMINDER + '\n<shared-memory-context>other</shared-memory-context>'},
+                               {"content": wrapper}]}, False),
+            ):
+                with self.subTest(expected=expected, body=body):
+                    request = Request(provider.url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(request, timeout=2)
+                    self.assertEqual(error.exception.code, 400)
+                    error.exception.close()
+                    self.assertEqual(provider.requests[-1]['workflow_reminder_present'], expected)
+        finally:
+            provider.close()
 
 
 if __name__ == "__main__":
