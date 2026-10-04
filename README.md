@@ -1,3 +1,5 @@
+<p align="center"><img src="src/shared_memory_mcp/assets/logo.svg" width="112" alt="Three agents share one Markdown memory" /></p>
+
 # shared-memory-mcp
 
 Small shared Markdown memory for **Claude Code, Codex CLI, and Pi**, with independent native memories.
@@ -40,6 +42,8 @@ Python 3.11+ is required. Current native compatibility is qualified on Linux wit
 From a checkout:
 
 ```sh
+git clone https://github.com/Pein2017/shared-memory-mcp.git
+cd shared-memory-mcp
 python -m venv .venv
 .venv/bin/pip install -e '.[mcp,test]'
 .venv/bin/shared-memory --root /path/to/central-memory init
@@ -75,14 +79,16 @@ MCP initialization and operation descriptions expose the workflow entry and use 
 
 | Tool | Purpose |
 | --- | --- |
-| `memory_context` | Fresh bounded startup/task view |
-| `memory_search` | Scoped lexical listings within a 12,000-byte response budget |
-| `memory_read` | Full records by ID; optional historical visibility |
-| `memory_propose` | Candidate capture with a source-event idempotency key |
-| `memory_promote` | Explicit review, preserving the captured content |
-| `memory_supersede` | Accept a candidate successor with predecessor links |
+| `context` | Fresh bounded startup/task view |
+| `search` | Scoped lexical listings within a 12,000-byte response budget |
+| `read` | Full records by ID; optional historical visibility |
+| `create` | Candidate capture with a source-event idempotency key |
+| `approve` | Explicit review, preserving the captured content |
+| `update` | Publish successor candidate `id`, retiring exact-scope `old_ids` |
+| `delete` | Reviewed withdrawal of one record; retain original contents and audit history |
 
-Pi exposes these six tools directly. Native namespaces may prefix their names. Codex may expose MCP tools through its native deferred discovery/code-mode catalog; absence from the initial direct tool list does not mean the server is disconnected.
+Pi exposes these seven tools directly. Native namespaces may prefix their names, for example `mcp__shared_memory__update`. Codex may expose MCP tools through its native deferred discovery/code-mode catalog; absence from the initial direct tool list does not mean the server is disconnected.
+Version 0.2 replaces the old `memory_context/search/read/propose/promote/supersede` names with the names above. Reconnect MCP clients or start fresh sessions to refresh tool catalogs. There are no legacy aliases. Server/tool icons are embedded SVG metadata; the shared skill also supplies its own local logo. Actual rendering depends on client support.
 Search keeps complete short bodies when they fit. Larger bodies are omitted with explicit size information; use `memory_read` for the complete record. Listings preserve source and provenance fields or omit the whole item when it cannot fit. The response reports omitted matches. The 12,000-byte bound covers the core JSON envelope; MCP may encode it as both text and structured content.
 
 A proposal has:
@@ -105,11 +111,13 @@ Use project scope for durable shared knowledge, worktree scope for local continu
 
 Capture at meaningful decisions, conclusions, failures/root causes, and handoffs. Ordinary tool activity and recalled summaries create no records. Repeated recollection does not count as independent corroboration. Existing research/OpenSpec/artifact owners remain authoritative; keep memory compact and link to them.
 
+To correct knowledge: `create` a successor candidate, check its sources, then `update` with the new candidate ID, old IDs, review and operation key. `update` publishes the reviewed successor; it does not edit an old body in place. To withdraw knowledge without a replacement: `delete` with the target ID, source-linked review and operation key. It appends a withdrawal marker and hides both marker and target from normal recall. `read/search(include_inactive=true)` retain their history. Withdrawn candidates cannot be approved. Withdrawing a successor never reactivates its predecessors; restore knowledge with a new candidate and review. Delete is logical withdrawal, not physical erasure.
+
 Same operation key and payload replay the original publication. Reusing a key for different content fails. Promotion cannot rewrite accepted content. Supersession requires the same project and exact scope qualifiers. Optional UTC `expires_at` removes temporary material from normal recall; history remains available.
 
 ## Record format and audit
 
-Each UTF-8 Markdown file starts with one fenced JSON metadata block, then the readable body. Metadata contains schema version, stable ID, project/applicability, kind/status, origin, sources, timestamps, proposal/review operation identities, and optional supersession/expiry.
+Each UTF-8 Markdown file starts with one fenced JSON metadata block, then the readable body. Metadata contains schema version, stable ID, project/applicability, kind/status, origin, sources, timestamps, proposal/review operation identities, and optional supersession/expiry. A reviewed withdrawal marker instead carries `withdraws` and its own review operation identity, without a fabricated proposal. Both target and marker retain their original scope. Existing records need no migration; older readers reject unfamiliar markers explicitly.
 
 The write gateway maintains serialization, digests, and lifecycle invariants. Inspect/diff canonical Markdown freely; use a successor for corrections instead of hand-editing accepted records. Metadata validates structure and replay consistency; it does not authenticate authors or establish scientific truth.
 
@@ -122,7 +130,7 @@ Track canonical files and registry configuration with Git if desired. Git is use
 - Lexical search can miss synonyms. A rebuildable FTS cache is a later option; freshness must include corpus membership and supersession edges, not just returned-file timestamps.
 - Provenance and review references are self-reported cooperating-agent metadata. Source validation is syntactic; semantic review remains the agent/user owner's responsibility.
 - Claude/Codex startup/resume/clear/compact hooks append bounded current snapshots. They cannot erase earlier conversation history or compacted summaries. Pi replaces its owned context message. Real-model resume/compaction and Claude fork sessions remain unmeasured; event envelopes are source/fixture checked.
-- Lifecycle hooks perform recall only. No guaranteed transcript distillation, automatic scientific consolidation, time-based truth decay, or physical deletion is provided.
+- Lifecycle hooks perform recall only. No guaranteed transcript distillation, automatic scientific consolidation, time-based truth decay, or physical deletion is provided; `delete` retains auditable withdrawal history.
 - The fixed workflow reminder consumes part of the existing startup budget. If a supported small budget cannot hold the complete reminder and required scope/caller wrapper, context returns an empty diagnostic view. Reminder delivery does not establish that a model followed it or used every relevant record.
 
 ## Diagnostics and rollback
@@ -152,4 +160,4 @@ Explicit paid Haiku qualification: `python tests/claude_haiku_probe.py --live --
 
 After installation, native Haiku usage is `claude --print --model claude-haiku-4-5-20251001 -- "Your task"`. To check the actual configured startup without inference, use `python tests/claude_haiku_probe.py --actual-startup --claude-dir /path/to/claude-config --actual-cwd /path/to/registered-project --memory-root /path/to/central-memory`. This uses a local rejecting provider and disables auto-memory/account MCP only for that test invocation; stored native settings are preserved.
 
-The owning changes are the [initial core/Codex/Pi implementation](openspec/changes/build-shared-memory-mcp/proposal.md) and [Claude qualification](openspec/changes/qualify-claude-haiku/proposal.md). Local validation receipts live under ignored `outputs/`; they are implementation evidence, not research results.
+The owning changes are the [initial core/Codex/Pi implementation](openspec/changes/build-shared-memory-mcp/proposal.md), [Claude qualification](openspec/changes/qualify-claude-haiku/proposal.md) and [direct tools, withdrawal and branding](openspec/changes/simplify-memory-tools-and-branding/proposal.md). Local validation receipts live under ignored `outputs/`; they are implementation evidence, not research results.

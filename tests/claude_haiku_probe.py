@@ -17,7 +17,7 @@ from shared_memory_mcp.core import MemoryStore
 
 SOURCE = Path(__file__).resolve().parents[1]
 MODEL = 'claude-haiku-4-5-20251001'
-TOOLS = ['memory_context','memory_search','memory_read','memory_propose','memory_promote','memory_supersede']
+TOOLS = ['context','search','read','create','approve','update','delete']
 
 
 def unpack(response):
@@ -38,12 +38,12 @@ async def peer_operations(cli, root, project, source, words, identifier=None):
             async with ClientSession(reader,writer) as session:
                 await session.initialize()
                 if identifier:
-                    records[harness] = unpack(await session.call_tool('memory_read',{'context':context,'ids':[identifier]}))['items'][0]
+                    records[harness] = unpack(await session.call_tool('read',{'context':context,'ids':[identifier]}))['items'][0]
                 else:
                     record = {'kind':'observation','title':'Synthetic '+harness+' peer','body':words[harness],
                               'scope':'project','sources':[source]}
-                    proposed = unpack(await session.call_tool('memory_propose',{'context':context,'record':record,'idempotency_key':'seed-'+harness}))['record']
-                    records[harness] = unpack(await session.call_tool('memory_promote',{'context':context,'id':proposed['id'],
+                    proposed = unpack(await session.call_tool('create',{'context':context,'record':record,'idempotency_key':'seed-'+harness}))['record']
+                    records[harness] = unpack(await session.call_tool('approve',{'context':context,'id':proposed['id'],
                         'review':{'reason':'Synthetic fixture value supplied by test owner','evidence':[source]},
                         'idempotency_key':'review-'+harness}))['record']
     return records
@@ -128,12 +128,12 @@ def actual_startup(args):
         receipt = {'status':'pass' if ok else 'failed','configuration':'actual user config','model':MODEL,
                    'native_session_id':init.get('session_id'),'scope':expected,'exit_code':result['exit_code'],
                    'exit_reason':'expected local HTTP400 rejection','deadline_hit':result['deadline_hit'],
-                   'six_native_tools':sorted(names),'provider_requests':requests,
+                   'native_tools':sorted(names),'provider_requests':requests,
                    'credentials_unchanged':credentials_path.read_bytes()==original_credentials,
                    'model_inference_calls':0,'real_provider_requests':0,
                    'per_invocation_overrides':{'autoMemoryEnabled':False,'disableClaudeAiMcp':True}}
         (SOURCE/'outputs/actual-claude-session.json').write_text(json.dumps(receipt,indent=2)+'\n')
-        print(json.dumps({key:receipt[key] for key in ('status','configuration','model','exit_code','deadline_hit','six_native_tools','credentials_unchanged')}))
+        print(json.dumps({key:receipt[key] for key in ('status','configuration','model','exit_code','deadline_hit','native_tools','credentials_unchanged')}))
         if not ok: raise RuntimeError('Actual native startup boundary failed; inspect sanitized receipt')
         return 0
     finally:
@@ -203,9 +203,9 @@ def main():
             save()
             guidance = ('This is a bounded synthetic shared-memory qualification. Use only the shared-memory MCP tools. '
                 'Use the exact caller_context supplied by your startup <shared-memory-context>, including actual session_id. '
-                'Copy STARTUP_<nonce> from that already injected memory; never call memory_context or memory_search to obtain it. '
+                'Copy STARTUP_<nonce> from that already injected memory; never call context or search to obtain it. '
                 'Only read the explicitly supplied peer IDs. Do not use built-in tools or create unrelated records. ')
-            prompt = guidance+'Read both peer IDs '+json.dumps([r['id'] for r in peers.values()])+'. Then propose one project-scope observation, title Claude native Haiku qualification, exact body '+words['claude']+'. Source uri '+owner.as_uri()+'. Use proposal key haiku-capture. Explicitly promote that candidate using key haiku-review, reason Synthetic value checked against this supplied test source, evidence the same URI. Return JSON with startup_word, both peer bodies, and created_record_id.'
+            prompt = guidance+'Read both peer IDs '+json.dumps([r['id'] for r in peers.values()])+'. Then create one project-scope observation candidate, title Claude native Haiku qualification, exact body '+words['claude']+'. Source uri '+owner.as_uri()+'. Use creation key haiku-capture. Explicitly approve that candidate using key haiku-review, reason Synthetic value checked against this supplied test source, evidence the same URI. Return JSON with startup_word, both peer bodies, and created_record_id.'
             receipt, text, init = native(run,'writer',command,project,env,prompt)
             report['sessions'].append(receipt);save()
             assert receipt['exit_code']==0 and not receipt['deadline_hit'] and not receipt['is_error'], receipt
@@ -213,7 +213,7 @@ def main():
             assert set(receipt['reported_models'])=={MODEL}, receipt
             assert words['startup'] in text and all(words[name] in text for name in ('codex','pi')), 'Startup/peer values missing'
             used = {name.rsplit('__',1)[-1] for name in receipt['tools']}
-            assert used=={'memory_read','memory_propose','memory_promote'}, receipt
+            assert used=={'read','create','approve'}, receipt
             context = {'cwd':str(project),'harness':'claude','session_id':'lead-readback','actor':'lead'}
             captured = next(item for item in store.search(context,'Claude native Haiku qualification')['items'] if item.get('body')==words['claude'])
             assert captured['effective_status']=='active' and captured['provenance']['harness']=='claude'
@@ -229,7 +229,7 @@ def main():
             assert receipt['exit_code']==0 and not receipt['deadline_hit'] and not receipt['is_error'],receipt
             assert receipt['native_session_id']==receipt['session_id'] and receipt['init_model']==MODEL,receipt
             assert set(receipt['reported_models'])=={MODEL} and words['startup'] in text and words['claude'] in text,receipt
-            assert {name.rsplit('__',1)[-1] for name in receipt['tools']}=={'memory_read'},receipt
+            assert {name.rsplit('__',1)[-1] for name in receipt['tools']}=={'read'},receipt
             assert captured['id'] in text and store.doctor()['projects']['haiku-qualification']==4
             assert not (home/'.credentials.json').exists(), 'Native fixture unexpectedly persisted credentials'
             report.update(status='pass',fresh_session_recall=True,real_native_sessions=2,

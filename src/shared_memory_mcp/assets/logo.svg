@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Shared Memory</title>
+  <desc id="desc">Three distinct agent nodes connect to one shared Markdown document.</desc>
+  <rect width="256" height="256" rx="48" fill="#101629"/>
+  <rect x="1" y="1" width="254" height="254" rx="47" fill="none" stroke="#27304C" stroke-width="2"/>
+  <g fill="none" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M64 68h10q12 0 12 12v16q0 12 12 12" stroke="#22D3EE"/>
+    <path d="M64 188h10q12 0 12-12v-4q0-12 12-12" stroke="#818CF8"/>
+    <path d="M212 68v34q0 12-12 12h-14" stroke="#A78BFA"/>
+  </g>
+  <circle cx="48" cy="68" r="18" fill="#22D3EE"/>
+  <path d="m48 166 22 22-22 22-22-22Z" fill="#818CF8"/>
+  <rect x="194" y="32" width="36" height="36" rx="10" fill="#A78BFA"/>
+  <path d="M108 68h48l30 30v94a12 12 0 0 1-12 12h-66a12 12 0 0 1-12-12V80a12 12 0 0 1 12-12Z" fill="#1D2943" stroke="#A5F3FC" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M156 68v22a8 8 0 0 0 8 8h22" fill="#314361" stroke="#A5F3FC" stroke-width="6" stroke-linejoin="round"/>
+  <g fill="none" stroke="#E0F2FE" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M113 151v-28l13 16 13-16v28"/>
+    <path d="M159 123v28m-8-8 8 8 8-8"/>
+  </g>
+  <path d="M114 177h54" fill="none" stroke="#22D3EE" stroke-width="6" stroke-linecap="round"/>
+</svg>

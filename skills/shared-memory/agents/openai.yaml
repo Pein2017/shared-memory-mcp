@@ -1,0 +1,10 @@
+interface:
+  display_name: "Shared Memory"
+  short_description: "Recall and capture shared project knowledge"
+  icon_small: "./assets/logo.svg"
+  icon_large: "./assets/logo.svg"
+  brand_color: "#22D3EE"
+  default_prompt: "Use $shared-memory to recall relevant project history and capture durable findings."
+
+policy:
+  allow_implicit_invocation: true

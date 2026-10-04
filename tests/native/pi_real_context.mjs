@@ -53,7 +53,8 @@ try {
   // Dispatch the real startup wait boundary without launching agent.prompt or a provider.
   await session.extensionRunner.emitBeforeAgentStart("Synthetic startup probe", undefined, { sections: {} });
   const names = session.getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("mcp__shared_memory__"));
-  assert.equal(names.length, 6);
+  assert.deepEqual(names.map((name) => name.split('__').at(-1)).sort(),
+    ["context", "search", "read", "create", "approve", "update", "delete"].sort());
   assert.deepEqual(errors, []);
   assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"));
   console.log(JSON.stringify({ status: "pass", actual_cli: options.cli, installed_sdk: options.sdkRoot,

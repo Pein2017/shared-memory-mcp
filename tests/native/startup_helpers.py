@@ -21,13 +21,13 @@ async def seed(options):
     async with stdio_client(params) as (reader,writer):
         async with ClientSession(reader,writer) as session:
             await session.initialize()
-            proposed = unpack(await session.call_tool('memory_propose',{'context':context,
+            proposed = unpack(await session.call_tool('create',{'context':context,
                 'record':{'kind':'invariant','title':'Synthetic startup sentinel','body':options['sentinel'],
                           'scope':'project','sources':[source]},'idempotency_key':'native-propose'}))
             identifier = proposed['record']['id']
-            unpack(await session.call_tool('memory_promote',{'context':context,'id':identifier,
+            unpack(await session.call_tool('approve',{'context':context,'id':identifier,
                 'review':{'reason':'Synthetic test fixture only','evidence':[source]},'idempotency_key':'native-promote'}))
-            recalled = unpack(await session.call_tool('memory_context',{'context':context}))
+            recalled = unpack(await session.call_tool('context',{'context':context}))
             tools = await session.list_tools()
     print(json.dumps({'status':'ok','id':identifier,'text_chars':len(recalled['text']),
                       'sentinel_present':options['sentinel'] in recalled['text'],

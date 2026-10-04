@@ -30,6 +30,228 @@ def active(store,ctx,key,record=None):
     return store.promote(ctx,proposed['record']['id'],REVIEW,key+'-review')['record']
 
 
+def test_delete_hides_active_knowledge_preserves_history_and_target_bytes(environment,monkeypatch):
+    store,ctx,_ = environment
+    target = active(store,ctx,'withdraw-active')
+    path = store.root/'records/demo'/f'{target["id"]}.md'
+    before = path.read_bytes()
+    writes = []
+    publish = store._publish
+    def track(path,data):
+        writes.append(path)
+        publish(path,data)
+    monkeypatch.setattr(store,'_publish',track)
+    result = store.delete(ctx,target['id'],REVIEW,'withdraw-review')
+    marker = result['record']
+    assert len(writes) == 1 and writes[0] != path
+    assert marker['withdraws'] == target['id'] and marker['effective_status'] == 'withdrawal'
+    assert marker['kind'] == 'decision' and marker['review']['reason'] == REVIEW['reason']
+    assert marker['sources'] == REVIEW['evidence']
+    assert not {'proposal','expires_at','supersedes'} & marker.keys()
+    assert path.read_bytes() == before
+    assert store.search(ctx,'')['items'] == store.context(ctx)['items'] == []
+    assert store.read(ctx,[target['id'],marker['id']])['missing_ids'] == [target['id'],marker['id']]
+    history = store.read(ctx,[target['id'],marker['id']],True)['items']
+    assert [r['effective_status'] for r in history] == ['withdrawn','withdrawal']
+    assert store.delete(ctx,target['id'],REVIEW,'withdraw-review')['replayed']
+    assert len(writes) == 1
+
+
+@pytest.mark.parametrize('operation',['promote','supersede'])
+def test_withdrawn_candidate_cannot_be_published(environment,operation):
+    store,ctx,_ = environment
+    predecessor = active(store,ctx,'candidate-predecessor')
+    candidate = store.propose(ctx,rec(),'withdraw-candidate')['record']
+    store.delete(ctx,candidate['id'],REVIEW,'candidate-delete')
+    before = {p.name:p.read_bytes() for p in (store.root/'records/demo').glob('*.md')}
+    with pytest.raises(MemoryError) as error:
+        if operation == 'promote':
+            store.promote(ctx,candidate['id'],REVIEW,'candidate-review')
+        else:
+            store.supersede(ctx,candidate['id'],[predecessor['id']],REVIEW,'candidate-review')
+    assert error.value.code == 'immutable_record'
+    assert {p.name:p.read_bytes() for p in (store.root/'records/demo').glob('*.md')} == before
+
+
+def test_successor_withdrawal_never_restores_predecessor(environment,monkeypatch):
+    from datetime import datetime,timezone
+    import shared_memory_mcp.core as core
+    store,ctx,_ = environment
+    old = active(store,ctx,'withdraw-predecessor')
+    successor = store.propose(ctx,rec(expires_at='2099-01-01T00:00:00Z'),'withdraw-successor')['record']
+    store.supersede(ctx,successor['id'],[old['id']],REVIEW,'withdraw-successor-review')
+    store.delete(ctx,successor['id'],REVIEW,'withdraw-successor-delete')
+    class Future(datetime):
+        @classmethod
+        def now(cls,tz=None): return datetime(2100,1,1,tzinfo=timezone.utc)
+    monkeypatch.setattr(core,'datetime',Future)
+    assert store.search(ctx,'')['items'] == []
+    assert [r['effective_status'] for r in store.read(ctx,[old['id'],successor['id']],True)['items']] == ['superseded','withdrawn']
+    fresh = store.propose(ctx,rec(),'withdraw-fresh')['record']
+    with pytest.raises(MemoryError) as error:
+        store.supersede(ctx,fresh['id'],[successor['id']],REVIEW,'withdraw-fresh-review')
+    assert error.value.code == 'scope_mismatch'
+
+
+@pytest.mark.parametrize('state',['candidate','expired','superseded'])
+def test_delete_accepts_visible_ordinary_history(environment,state):
+    store,ctx,_ = environment
+    if state == 'candidate':
+        target = store.propose(ctx,rec(),'history-target')['record']
+    elif state == 'expired':
+        target = store.propose(ctx,rec(expires_at='2000-01-01T00:00:00Z'),'history-target')['record']
+    else:
+        target = active(store,ctx,'history-target')
+        successor = store.propose(ctx,rec(),'history-successor')['record']
+        store.supersede(ctx,successor['id'],[target['id']],REVIEW,'history-update')
+    store.delete(ctx,target['id'],REVIEW,'history-delete')
+    assert store.read(ctx,[target['id']],True)['items'][0]['effective_status'] == 'withdrawn'
+
+
+@pytest.mark.parametrize('scope',['project','worktree','task'])
+def test_delete_preserves_exact_qualifiers_and_rejects_invisible_targets(environment,tmp_path,scope):
+    store,ctx,project = environment
+    ctx = {**ctx,'task_id':'owned'}
+    target = active(store,ctx,'scoped-delete',rec(scope))
+    if scope == 'project':
+        other = tmp_path/'other-project';other.mkdir()
+        store.register('other',[other])
+        wrong = {**ctx,'cwd':str(other)}
+    elif scope == 'worktree':
+        other = tmp_path/'other-worktree';other.mkdir()
+        store.register('demo',[other])
+        wrong = {**ctx,'cwd':str(other)}
+    else:
+        wrong = {**ctx,'task_id':'other'}
+    with pytest.raises(MemoryError) as error:
+        store.delete(wrong,target['id'],REVIEW,'invisible-delete')
+    assert error.value.code == 'not_found'
+    marker = store.delete(ctx,target['id'],REVIEW,'scoped-withdrawal-review')['record']
+    assert store._qualifier(marker) == store._qualifier(target)
+    if scope == 'project':
+        assert not {'worktree_id','task_id'} & marker.keys()
+    assert store.read(wrong,[marker['id']],True)['items'] == []
+
+
+def test_delete_replay_conflicts_and_marker_targets_fail_closed(environment):
+    store,ctx,_ = environment
+    target = active(store,ctx,'key-target')
+    with pytest.raises(MemoryError) as error:
+        store.delete(ctx,target['id'],REVIEW,'key-target-review')
+    assert error.value.code == 'idempotency_conflict'
+    marker = store.delete(ctx,target['id'],REVIEW,'delete-key')['record']
+    for review,key,code in [({**REVIEW,'reason':'changed'},'delete-key','idempotency_conflict'),(REVIEW,'new-delete-key','already_withdrawn')]:
+        with pytest.raises(MemoryError) as error:
+            store.delete(ctx,target['id'],review,key)
+        assert error.value.code == code
+    candidate = store.propose(ctx,rec(),'key-candidate')['record']
+    with pytest.raises(MemoryError) as error:
+        store.promote(ctx,candidate['id'],REVIEW,'delete-key')
+    assert error.value.code == 'idempotency_conflict'
+    with pytest.raises(MemoryError) as error:
+        store.delete(ctx,marker['id'],REVIEW,'marker-delete')
+    assert error.value.code == 'invalid_target'
+    assert store.doctor()['projects']['demo'] == 3
+
+
+@pytest.mark.parametrize('change',['missing','scope','marker_target','duplicate','proposal','expiry','supersedes','candidate','kind','ordinary_without_proposal','link_digest'])
+def test_malformed_withdrawal_corpus_fails_closed(environment,change):
+    import uuid
+    from shared_memory_mcp.core import _digest
+    store,ctx,_ = environment
+    target = active(store,ctx,'malformed-target')
+    other = active(store,ctx,'malformed-other')
+    marker = store.delete(ctx,target['id'],REVIEW,'malformed-delete')['record']
+    if change == 'missing': marker['withdraws'] = 'a'*32
+    elif change == 'scope': marker.update(scope='task',worktree_id=store.resolve(ctx)['worktree_id'],task_id='invisible')
+    elif change == 'marker_target': marker['withdraws'] = marker['id']
+    elif change == 'duplicate':
+        marker.update(id=uuid.uuid4().hex,promotion={**marker['promotion'],'key':'duplicate-delete'})
+    elif change == 'proposal': marker['proposal'] = target['proposal']
+    elif change == 'expiry': marker['expires_at'] = '2099-01-01T00:00:00Z'
+    elif change == 'supersedes': marker['supersedes'] = [other['id']]
+    elif change == 'candidate': marker['status'] = 'candidate'
+    elif change == 'kind': marker['kind'] = 'observation'
+    elif change == 'ordinary_without_proposal':
+        marker = target
+        marker.pop('proposal')
+    elif change == 'link_digest': marker['withdraws'] = other['id']
+    if change != 'link_digest': marker['content_digest'] = _digest(store._content(marker))
+    store._write(marker,create=change=='duplicate')
+    # Validation must inspect even a malformed marker invisible to the caller.
+    with pytest.raises(MemoryError) as error:
+        store.search(ctx,'')
+    assert error.value.code == 'corrupt_record'
+    result = store.context(ctx)
+    assert result['status'] == 'invalid' and result['items'] == [] and result['text'] == ''
+
+
+def _delete_writer(root,ctx,id,key,queue):
+    try:
+        result = MemoryStore(root).delete(ctx,id,REVIEW,key)
+        queue.put(('ok',result['record']['id'],result['replayed']))
+    except MemoryError as exc:
+        queue.put((exc.code,None,None))
+
+
+@pytest.mark.parametrize('same_key',[True,False])
+def test_concurrent_delete_has_one_publication(environment,same_key):
+    store,ctx,_ = environment
+    target = active(store,ctx,'parallel-delete-target')
+    spawn = multiprocessing.get_context('spawn')
+    queue = spawn.Queue()
+    workers = [spawn.Process(target=_delete_writer,args=(str(store.root),ctx,target['id'],'parallel-delete' if same_key else str(i),queue)) for i in range(4)]
+    for process in workers: process.start()
+    for process in workers:
+        process.join(30)
+        assert process.exitcode == 0
+    results = [queue.get(timeout=5) for _ in workers]
+    queue.close()
+    if same_key:
+        assert all(r[0] == 'ok' for r in results) and len({r[1] for r in results}) == 1
+        assert sum(r[2] is False for r in results) == 1
+    else:
+        assert sorted(r[0] for r in results) == ['already_withdrawn']*3+['ok']
+    assert store.doctor()['projects']['demo'] == 2
+
+
+def test_delete_publication_crash_replays_original_marker(environment):
+    store,ctx,_ = environment
+    target = active(store,ctx,'crash-delete-target')
+    path = store.root/'records/demo'/f'{target["id"]}.md'
+    before = path.read_bytes()
+    script = '''import json,os,sys
+from shared_memory_mcp import MemoryStore
+store=MemoryStore(sys.argv[1]);ctx=json.loads(sys.argv[2]);review=json.loads(sys.argv[3])
+publish=store._publish
+def crash(path,data):
+ publish(path,data)
+ os._exit(75)
+store._publish=crash
+store.delete(ctx,sys.argv[4],review,'crash-delete')
+'''
+    result = subprocess.run(['python','-c',script,str(store.root),json.dumps(ctx),json.dumps(REVIEW),target['id']])
+    assert result.returncode == 75
+    fresh = MemoryStore(store.root)
+    retry = fresh.delete(ctx,target['id'],REVIEW,'crash-delete')
+    assert retry['replayed'] and retry['record']['effective_status'] == 'withdrawal'
+    assert fresh.doctor()['projects']['demo'] == 2 and path.read_bytes() == before
+
+
+def test_delete_uuid_collision_does_not_replace_target(environment,monkeypatch):
+    import uuid
+    store,ctx,_ = environment
+    target = active(store,ctx,'delete-collision-target')
+    path = store.root/'records/demo'/f'{target["id"]}.md'
+    before = path.read_bytes()
+    monkeypatch.setattr('shared_memory_mcp.core.uuid.uuid4',lambda:uuid.UUID(target['id']))
+    with pytest.raises(MemoryError) as error:
+        store.delete(ctx,target['id'],REVIEW,'delete-collision')
+    assert error.value.code == 'id_collision'
+    assert path.read_bytes() == before and store.doctor()['projects']['demo'] == 1
+    assert store.read(ctx,[target['id']])['items'][0]['effective_status'] == 'active'
+
+
 def test_empty_registered_context_has_owned_workflow_reminder(environment):
     store,ctx,_ = environment
     before = list((store.root/'records').rglob('*.md'))
@@ -519,7 +741,7 @@ def test_installed_sdk_search_envelope_and_text_representation_are_bounded(envir
         async with stdio_client(params) as (read,write):
             async with ClientSession(read,write) as session:
                 await session.initialize()
-                response=await session.call_tool('memory_search',{'context':ctx,'query':'SDK large'})
+                response=await session.call_tool('search',{'context':ctx,'query':'SDK large'})
                 assert not response.isError, response
                 payload=response.structuredContent or json.loads(response.content[0].text)
                 assert len(json.dumps(payload,ensure_ascii=False).encode('utf-8')) <= 12000

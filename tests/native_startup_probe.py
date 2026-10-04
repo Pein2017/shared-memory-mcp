@@ -26,7 +26,7 @@ CLI = '/data/CoordExp/.shared-memory/.venv/bin/shared-memory'
 RUNTIME = str(Path(CLI).with_name('python'))
 PI_SDK = '/root/.nvm/versions/node/v22.22.0/lib/node_modules/@earendil-works/pi-coding-agent'
 HELPER = PACKAGE / 'tests/native/startup_helpers.py'
-TOOLS = ['memory_context','memory_search','memory_read','memory_propose','memory_promote','memory_supersede']
+TOOLS = ['context','search','read','create','approve','update','delete']
 CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
 
 
@@ -84,22 +84,30 @@ class Provider:
                 except ValueError:
                     body = {}
                 tools, tool_names, tool_types, schema_tools = [], [], [], []
-                def walk(value):
+                def walk(value, namespace=None):
                     if isinstance(value,dict):
                         name = value.get('name')
+                        kind = value.get('type')
+                        if kind == 'namespace':
+                            namespace = name if isinstance(name,str) else ''
                         if isinstance(name,str):
                             tool_names.append(name)
-                        if isinstance(name,str) and 'memory_' in name:
-                            tools.append(name)
+                        memory_namespaces = ('mcp__shared_memory','mcp__shared-memory')
+                        qualified = None
+                        if isinstance(name,str) and name.rsplit('__',1)[0] in memory_namespaces and name.rsplit('__',1)[-1] in TOOLS:
+                            qualified = name
+                        if kind == 'function' and namespace in memory_namespaces and name in TOOLS:
+                            qualified = namespace+'__'+name
+                        if qualified and (namespace is None or qualified.rsplit('__',1)[0] == namespace):
+                            tools.append(qualified)
                             schema = value.get('input_schema',value.get('parameters'))
                             if isinstance(schema,dict) and schema.get('type')=='object' and 'context' in schema.get('properties',{}):
-                                schema_tools.append(name)
-                        kind = value.get('type')
+                                schema_tools.append(qualified)
                         if isinstance(kind,str):
                             tool_types.append(kind)
-                        for nested in value.values(): walk(nested)
+                        for nested in value.values(): walk(nested,namespace)
                     elif isinstance(value,list):
-                        for nested in value: walk(nested)
+                        for nested in value: walk(nested,namespace)
                 walk(body.get('tools',[]))
                 additional = [item for item in body.get('input',[]) if isinstance(item,dict) and item.get('type')=='additional_tools']
                 for item in additional:

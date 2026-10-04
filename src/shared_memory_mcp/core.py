@@ -303,10 +303,16 @@ class MemoryStore:
                         _fail('corrupt_record','Duplicate canonical operation key')
                     operation_keys.add(key)
         by_id = {r['id']:r for r in records}
+        withdrawn = set()
         for record in records:
+            if 'withdraws' in record:
+                target = by_id.get(record['withdraws'])
+                if not target or 'withdraws' in target or self._qualifier(target) != self._qualifier(record) or target['id'] in withdrawn:
+                    _fail('corrupt_record','Invalid or duplicate canonical withdrawal edge')
+                withdrawn.add(target['id'])
             for predecessor in record.get('supersedes',[]):
                 old = by_id.get(predecessor)
-                if not old or old['status'] != 'active' or self._qualifier(old) != self._qualifier(record) or old['id'] == record['id']:
+                if not old or 'withdraws' in old or old['status'] != 'active' or self._qualifier(old) != self._qualifier(record) or old['id'] == record['id']:
                     _fail('corrupt_record','Invalid canonical supersession edge')
         # Acyclic and each predecessor has one successor; no ambiguous winners.
         successors = {}
@@ -326,9 +332,14 @@ class MemoryStore:
         return records
 
     def _validate_canonical(self, r, body, path, project_id):
-        required = {'version','id','project_id','scope','kind','title','sources','status','created_at','provenance','proposal','content_digest'}
-        allowed = required | {'worktree_id','task_id','expires_at','review','promotion','supersedes'}
+        required = {'version','id','project_id','scope','kind','title','sources','status','created_at','provenance','content_digest'}
+        allowed = required | {'proposal','worktree_id','task_id','expires_at','review','promotion','supersedes','withdraws'}
         _keys(r,required,allowed,'canonical record')
+        if 'withdraws' in r:
+            if not isinstance(r['withdraws'],str) or not RECORD_ID.fullmatch(r['withdraws']) or r['kind'] != 'decision' or r['status'] != 'active' or {'proposal','expires_at','supersedes'} & r.keys():
+                raise ValueError('Invalid withdrawal marker')
+        elif 'proposal' not in r:
+            raise ValueError('Ordinary record lacks proposal')
         if r['version'] != 1 or not RECORD_ID.fullmatch(r['id']) or path.stem != r['id'] or r['project_id'] != project_id or r['status'] not in ('candidate','active'):
             raise ValueError('Identity or status mismatch')
         self._record_input({name:value for name,value in {**r,'body':body}.items() if name in {'kind','title','body','scope','sources','expires_at'}})
@@ -377,7 +388,7 @@ class MemoryStore:
             raise ValueError('Accepted/proposed content integrity mismatch')
 
     def _content(self, record):
-        return {key:record[key] for key in ('project_id','scope','worktree_id','task_id','kind','title','body','sources','expires_at') if key in record}
+        return {key:record[key] for key in ('project_id','scope','worktree_id','task_id','kind','title','body','sources','expires_at','withdraws') if key in record}
 
     def _qualifier(self, r):
         return tuple(r.get(key) for key in ('project_id','scope','worktree_id','task_id'))
@@ -387,8 +398,9 @@ class MemoryStore:
 
     def _effective(self, records):
         superseded = {old for r in records for old in r.get('supersedes',[])}
+        withdrawn = {r['withdraws'] for r in records if 'withdraws' in r}
         now = datetime.now(timezone.utc)
-        return [{**r,'effective_status':'superseded' if r['id'] in superseded else 'expired' if 'expires_at' in r and _utc(r['expires_at']) <= now else r['status']} for r in records]
+        return [{**r,'effective_status':'withdrawal' if 'withdraws' in r else 'withdrawn' if r['id'] in withdrawn else 'superseded' if r['id'] in superseded else 'expired' if 'expires_at' in r and _utc(r['expires_at']) <= now else r['status']} for r in records]
 
     def _retry(self, records, operation, key, digest):
         _nonempty(key,'idempotency_key')
@@ -467,6 +479,8 @@ class MemoryStore:
                 _fail('immutable_record','Accepted records cannot be reviewed or edited again')
             if r['effective_status'] == 'expired':
                 _fail('expired_record','Expired candidates cannot be promoted')
+            if r['effective_status'] != 'candidate':
+                _fail('immutable_record','Only effective candidates can be published')
             for old_id in old_ids:
                 old = by_id.get(old_id)
                 if not old or old['effective_status'] != 'active' or self._qualifier(old) != self._qualifier(r):
@@ -478,6 +492,41 @@ class MemoryStore:
                 r['supersedes'] = old_ids
             self._write(r)
             return self._result(r,[r if old['id'] == r['id'] else old for old in records])
+
+    def delete(self, context, id, review, idempotency_key):
+        if not isinstance(id,str) or not RECORD_ID.fullmatch(id):
+            _fail('invalid_input','delete requires a canonical target ID')
+        _keys(review,{'reason','evidence'},{'reason','evidence'},'review')
+        _nonempty(review['reason'],'review.reason')
+        _sources(review['evidence'])
+        with self._gate():
+            scope = self._resolve(context)
+            records = self._load(scope['project_id'])
+            digest = _digest({'operation':'delete','context':context,'id':id,'review':review})
+            prior = self._retry(records,'promotion',idempotency_key,digest)
+            if prior:
+                return self._result(prior,records,True)
+            target = next((r for r in self._effective(records) if r['id'] == id),None)
+            if not target or not self._visible(target,scope):
+                _fail('not_found','Record is not visible in resolved scope')
+            if 'withdraws' in target:
+                _fail('invalid_target','Withdrawal markers cannot be deleted')
+            if target['effective_status'] == 'withdrawn':
+                _fail('already_withdrawn','Record is already withdrawn')
+            provenance = {key:context[key] for key in ('cwd','harness','session_id','actor')}
+            provenance['cwd'] = scope['cwd']
+            marker = {key:target[key] for key in ('project_id','scope','worktree_id','task_id') if key in target}
+            marker.update(version=1,id=uuid.uuid4().hex,kind='decision',title='Withdrawal: '+target['title'],
+                          body=review['reason'],sources=review['evidence'],withdraws=id,status='active',
+                          created_at=_now(),provenance=provenance,
+                          review={**review,'reviewer':dict(provenance),'reviewed_at':_now()},
+                          promotion={'key':idempotency_key,'digest':digest})
+            git_locator = _git_locator(scope['cwd'])
+            if git_locator is not None:
+                marker['provenance']['git'] = git_locator
+            marker['content_digest'] = _digest(self._content(marker))
+            self._write(marker,create=True)
+            return self._result(marker,records+[marker])
 
     def _selection(self, context, include_inactive=False):
         scope = self._resolve(context)
