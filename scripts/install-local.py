@@ -75,6 +75,18 @@ def add_server(document: dict, command: str, arguments: list[str]) -> dict:
     return result
 
 
+def claude_server_present(document: dict, command: str, arguments: list[str]) -> bool:
+    servers = document.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise ValueError("Claude mcpServers must be an object")
+    if NAME not in servers:
+        return False
+    expected = {"type": "stdio", "command": command, "args": arguments}
+    if servers[NAME] != expected:
+        raise ValueError("Claude shared-memory MCP entry belongs to another configuration")
+    return True
+
+
 def add_extension(document: dict, extension: str) -> dict:
     result = copy.deepcopy(document)
     entries = result.setdefault("extensions", [])
@@ -180,6 +192,7 @@ def main() -> int:
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--codex-home", type=Path, default=os.environ.get("CODEX_HOME"))
     parser.add_argument("--pi-dir", type=Path, default=os.environ.get("PI_CODING_AGENT_DIR"))
+    parser.add_argument("--claude-dir", type=Path, help="Explicit opt-in Claude configuration directory")
     parser.add_argument("--cwd", required=True, type=Path, help="Registered project for native hook discovery")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
@@ -189,6 +202,7 @@ def main() -> int:
     root, cli, home, pi, cwd = (p.resolve() for p in (
         args.root, args.cli, args.codex_home, args.pi_dir, args.cwd,
     ))
+    claude = args.claude_dir.resolve() if args.claude_dir else None
     if not cli.is_file() or not os.access(cli, os.X_OK):
         parser.error("--cli must be an installed executable")
     if not (root / "registry.json").is_file():
@@ -203,10 +217,12 @@ def main() -> int:
     wrapper = root / ".state" / "adapters" / "shared-memory.ts"
     commands = {
         harness: shlex.join([str(cli), "--root", str(root), "hook", "--harness", harness])
-        for harness in ("codex",)
+        for harness in (("codex", "claude") if claude else ("codex",))
     }
     arguments = ["--root", str(root), "serve"]
     paths = [home / "config.toml", home / "hooks.json", pi / "mcp.json", pi / "settings.json"]
+    if claude:
+        paths += [claude / "settings.json", claude / ".claude.json"]
     before = {str(path): path.read_bytes() if path.exists() else None for path in paths}
     codex_config = tomllib.loads((home / "config.toml").read_text()) if (home / "config.toml").exists() else {}
     existing = codex_config.get("mcp_servers", {}).get(NAME)
@@ -217,9 +233,16 @@ def main() -> int:
         pi / "mcp.json": add_server(load_json(pi / "mcp.json"), str(cli), arguments),
         pi / "settings.json": add_extension(load_json(pi / "settings.json"), str(wrapper)),
     }
+    if claude:
+        claude_registered = claude_server_present(load_json(claude / ".claude.json"), str(cli), arguments)
+        updates[claude / "settings.json"] = add_hook(load_json(claude / "settings.json"), commands["claude"])
     plan = {"status": "plan", "store": str(root), "source": str(source),
             "config_files": [str(p) for p in paths], "skill": str(skill_link),
             "pi_extension": str(wrapper), "mcp_name": NAME}
+    if claude:
+        plan.update(claude_dir=str(claude), claude_hook={"command": commands["claude"],
+            "matcher": "startup|resume|clear|compact"},
+            claude_mcp={"scope": "user", "registration": "identical" if claude_registered else "add"})
     if not args.apply:
         print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
@@ -234,6 +257,9 @@ def main() -> int:
             os.chmod(stored, 0o600)
         manifest.append({"path": str(path), "existed": payload is not None, "backup": str(stored) if payload is not None else None})
     atomic_text(backup / "manifest.json", json.dumps(manifest, indent=2) + "\n")
+    for path in paths:
+        if (path.read_bytes() if path.exists() else None) != before[str(path)]:
+            raise ValueError(f"Configuration changed during preflight: {path}")
     for path, data in updates.items():
         if (path.read_bytes() if path.exists() else None) != before[str(path)]:
             raise ValueError(f"Configuration changed during preflight: {path}")
@@ -249,6 +275,17 @@ def main() -> int:
         subprocess.run(["codex", "mcp", "add", NAME, "--", str(cli), *arguments],
                        env=dict(os.environ, CODEX_HOME=str(home)), check=True, capture_output=True, timeout=20)
     trust = trust_codex_hook(home, cwd, commands["codex"], backup / "codex-discovery.log")
+    if claude:
+        native_path = claude / ".claude.json"
+        if (native_path.read_bytes() if native_path.exists() else None) != before[str(native_path)]:
+            raise ValueError(f"Configuration changed during preflight: {native_path}")
+        if not claude_registered:
+            descriptor = {"type": "stdio", "command": str(cli), "args": arguments}
+            subprocess.run(["claude", "mcp", "add-json", "--scope", "user", NAME, json.dumps(descriptor)],
+                           env=dict(os.environ, CLAUDE_CONFIG_DIR=str(claude)), check=True,
+                           capture_output=True, timeout=20)
+        if not claude_server_present(load_json(native_path), str(cli), arguments):
+            raise ValueError("Native Claude did not persist the owned MCP entry")
     atomic_text(root / ".gitignore", "/.venv/\n/.state/\n/.writer-gate.sqlite3*\n") if not (root / ".gitignore").exists() else None
     print(json.dumps({**plan, "status": "installed", "backup": str(backup),
                       "codex_hook": trust}, ensure_ascii=False, indent=2))

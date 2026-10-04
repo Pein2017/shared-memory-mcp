@@ -1,7 +1,6 @@
 # shared-memory-mcp
 
-Small shared Markdown memory for **Codex CLI and Pi**, with independent native memories.
-Claude's adapter source is an inactive prototype; installation does not configure Claude.
+Small shared Markdown memory for **Claude Code, Codex CLI, and Pi**, with independent native memories.
 
 The initial deployment stores data at `/data/CoordExp/.shared-memory/`. Source lives in this independent repository. Sessions keep their existing working directories; the central registry chooses applicable project, worktree, and task records.
 
@@ -9,7 +8,8 @@ The initial deployment stores data at `/data/CoordExp/.shared-memory/`. Source l
 
 ```mermaid
 flowchart LR
-    Codex["Codex: native hook + MCP"] --> Core["One Python core"]
+    Claude["Claude: native hook + MCP"] --> Core["One Python core"]
+    Codex["Codex: native hook + MCP"] --> Core
     Pi["Pi: extension + native MCP"] --> Core
     Core --> MD["Canonical Markdown records"]
     Core --> Gate["SQLite: local writer coordination"]
@@ -35,7 +35,7 @@ One accepted successor contains `supersedes` links. Old records remain intact; e
 
 ## Setup
 
-Python 3.11+ is required. Current native compatibility is qualified on Linux with Codex 0.159.2 and Pi 1.0.1.
+Python 3.11+ is required. Current native compatibility is qualified on Linux with Claude Code 2.1.288, Codex 0.159.2, and Pi 1.0.1.
 
 From a checkout:
 
@@ -59,11 +59,11 @@ python scripts/install-local.py \
 # Append --apply to install.
 ```
 
-The installer registers one Codex SessionStart hook, one MCP entry in each supported harness, a configured Pi extension wrapper, and one `codex-home/skills/shared-memory` symlink to the bundled skill. The CoordExp deployment reuses its existing shared skill links; it creates no Claude/Pi skill copy.
+The default installer registers one Codex SessionStart hook, the Codex/Pi MCP entries, a configured Pi extension wrapper, and one `codex-home/skills/shared-memory` symlink to the bundled skill. Add `--claude-dir /path/to/claude-config` to explicitly include Claude's SessionStart hook and native user-scoped MCP registration. Omitting that option accesses no Claude configuration. The CoordExp deployment reuses its existing shared skill links; it creates no Claude/Pi skill copy.
 
 Codex hook trust is established through the installed native app-server's discovered hash for exactly the owned hook. Other trust entries and settings are preserved. Configuration backups are private under `.state/config-backups/`; do not commit them.
 
-Start a fresh native session after installation. Existing sessions may retain their original tool/configuration snapshot.
+Claude installation preserves its default model, native-memory settings, other hooks, and account/MCP configuration. Start a fresh native session after installation. Existing sessions may retain their original tool/configuration snapshot.
 
 ## Using memory
 
@@ -117,7 +117,7 @@ Track canonical files and registry configuration with Git if desired. Git is use
 - Recall scans canonical project files, with a 10,000-record project ceiling and a 1 MiB record ceiling. Exceeding a bound fails explicitly. Startup text defaults to eight records/6,000 Unicode characters with omission counts. Whole records that cannot fit are omitted, preserving conditions and source pointers. Explicit full reads are intentionally outside the compact search/startup budgets.
 - Lexical search can miss synonyms. A rebuildable FTS cache is a later option; freshness must include corpus membership and supersession edges, not just returned-file timestamps.
 - Provenance and review references are self-reported cooperating-agent metadata. Source validation is syntactic; semantic review remains the agent/user owner's responsibility.
-- Codex startup/resume/clear/compact hooks append bounded current snapshots. They cannot erase earlier conversation history or compacted summaries. Pi replaces its owned context message.
+- Claude/Codex startup/resume/clear/compact hooks append bounded current snapshots. They cannot erase earlier conversation history or compacted summaries. Pi replaces its owned context message. Real-model resume/compaction and Claude fork sessions remain unmeasured; event envelopes are source/fixture checked.
 - Lifecycle hooks perform recall only. No guaranteed transcript distillation, automatic scientific consolidation, time-based truth decay, or physical deletion is provided.
 
 ## Diagnostics and rollback
@@ -130,16 +130,21 @@ shared-memory --root /path/to/central-memory context \
 
 Unknown/ambiguous scope produces empty startup recall and a diagnostic. Malformed canonical records fail explicitly. Missing coordination state can be reconciled from canonical operation identities; stop all writers before removing or replacing the coordination database. It is operational state, not a disposable live search cache. Unpublished temporary files are not knowledge.
 
-Rollback removes only the `shared-memory` MCP entries, the exact owned SessionStart command, its owned Codex trust key, the configured Pi extension path, and the matching shared skill symlink. Leave canonical records and unrelated settings intact. Backups identify each original configuration; avoid restoring an entire old configuration over later user changes.
+Rollback removes only the `shared-memory` MCP entries, the exact owned SessionStart commands, the owned Codex trust key, the configured Pi extension path, and the matching shared skill symlink. Claude's owned entries are in its `settings.json` and user `.claude.json`. Leave canonical records and unrelated settings intact. Backups identify each original configuration; avoid restoring an entire old configuration over later user changes.
 
 ## Validation
 
 - Unit/consumer tests cover project/worktree/task isolation, collisions, concurrent writers, crash recovery, idempotency, supersession/expiry, provenance, corruption, budgets, and native hook envelopes.
 - Official SDK stdio clients exercise capture/review and fresh-process recall.
-- Installed Codex startup injection is verified in serialized requests against a local rejecting test provider. Installed Pi SDK verifies replacement and real MCP transport without inference.
+- Installed Claude/Codex startup injection is verified in serialized requests against a local rejecting test provider. Installed Pi SDK verifies replacement and real MCP transport without inference.
 - Three real GPT-6-Luna sessions verify Codex capture, Pi cross-read/capture, and fresh Codex cross-read. They use isolated stores/projects and preserve actual session provenance.
+- Two real native Haiku sessions verify startup consumption, peer fixture reads, explicit reviewed publication, and fresh-session recall. Independent Codex/Pi SDK clients read the same Claude publication; these are synthetic peer clients, not additional paid Codex/Pi sessions. Native init/assistant events verify the exact `claude-haiku-4-5-20251001` model and origin session.
 - Wheel installation is checked from outside this source tree; the core works when MCP imports are blocked.
 
-Run local tests with `python -m pytest -q` after installing the checkout. Native CPU probe: `python tests/native_startup_probe.py --harness all` (Codex/Pi). It requires installed harnesses and does not call a real model provider.
+Run local tests with `python -m pytest -q` after installing the checkout. Native CPU probe: `python tests/native_startup_probe.py --harness all` (Claude/Codex/Pi). It requires installed harnesses and does not call a real model provider.
 
-The owning change is [OpenSpec](openspec/changes/build-shared-memory-mcp/proposal.md). Local validation receipts live under ignored `outputs/`; they are implementation evidence, not research results.
+Explicit paid Haiku qualification: `python tests/claude_haiku_probe.py --live --claude-dir /path/to/existing/claude-config`. It permits two sessions capped at USD 1 each, uses an existing unexpired access token only in child environment, and copies no refresh token. The ordinary test suite never runs it. Haiku effort metadata is absent; the test omits effort/fallback flags and does not use `--bare`, which disables startup hooks.
+
+After installation, native Haiku usage is `claude --print --model claude-haiku-4-5-20251001 -- "Your task"`. To check the actual configured startup without inference, use `python tests/claude_haiku_probe.py --actual-startup --claude-dir /path/to/claude-config --actual-cwd /path/to/registered-project --memory-root /path/to/central-memory`. This uses a local rejecting provider and disables auto-memory/account MCP only for that test invocation; stored native settings are preserved.
+
+The owning changes are the [initial core/Codex/Pi implementation](openspec/changes/build-shared-memory-mcp/proposal.md) and [Claude qualification](openspec/changes/qualify-claude-haiku/proposal.md). Local validation receipts live under ignored `outputs/`; they are implementation evidence, not research results.

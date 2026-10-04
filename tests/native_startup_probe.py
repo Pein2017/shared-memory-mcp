@@ -26,6 +26,7 @@ RUNTIME = str(Path(CLI).with_name('python'))
 PI_SDK = '/root/.nvm/versions/node/v22.22.0/lib/node_modules/@earendil-works/pi-coding-agent'
 HELPER = PACKAGE / 'tests/native/startup_helpers.py'
 TOOLS = ['memory_context','memory_search','memory_read','memory_propose','memory_promote','memory_supersede']
+CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
 
 
 def environment(home):
@@ -81,7 +82,7 @@ class Provider:
                     body = json.loads(raw)
                 except ValueError:
                     body = {}
-                tools, tool_names, tool_types = [], [], []
+                tools, tool_names, tool_types, schema_tools = [], [], [], []
                 def walk(value):
                     if isinstance(value,dict):
                         name = value.get('name')
@@ -89,6 +90,9 @@ class Provider:
                             tool_names.append(name)
                         if isinstance(name,str) and 'memory_' in name:
                             tools.append(name)
+                            schema = value.get('input_schema',value.get('parameters'))
+                            if isinstance(schema,dict) and schema.get('type')=='object' and 'context' in schema.get('properties',{}):
+                                schema_tools.append(name)
                         kind = value.get('type')
                         if isinstance(kind,str):
                             tool_types.append(kind)
@@ -112,10 +116,13 @@ class Provider:
                             if all(key in caller for key in ('cwd','harness','session_id','actor')):
                                 callers.append({key:caller[key] for key in ('cwd','project_id','harness','session_id','actor','task_id') if key in caller})
                 find_callers(body.get('input',[]))
+                find_callers(body.get('messages',[]))
                 owner.requests.append({'method':'POST','path':self.path.split('?')[0],
+                    'model':body.get('model'), 'effort_fields_present':any(key in raw for key in ('"effort"','"reasoning_effort"')),
                     'body_bytes':size,'sentinel_present':owner.sentinel in raw,
                     'record_id_present':owner.identifier in raw,'context_wrapper_present':'shared-memory-context' in raw,
                     'memory_tools':sorted(set(tools)), 'tool_names':sorted(set(tool_names)),
+                    'memory_schema_tools':sorted(set(schema_tools)),
                     'tool_types':sorted(set(tool_types)),
                     'memory_names_in_request':[name for name in TOOLS if name in raw],
                     'json_fields':sorted(body) if isinstance(body,dict) else [],
@@ -195,7 +202,7 @@ def codex_trust(binary, home, project, env):
             process.kill(); process.wait()
 
 
-def summarize(result, requests, receipt):
+def summarize(result, requests, receipt, harness, cwd):
     events = []
     for raw in result.pop('stdout').splitlines():
         try: entry = json.loads(raw)
@@ -209,16 +216,26 @@ def summarize(result, requests, receipt):
                   real_provider_requests=0,model_inference_calls=0)
     matching = [request for request in requests if request['sentinel_present'] and request['record_id_present']]
     names = {name.rsplit('__',1)[-1] for request in matching for name in request['memory_tools']}
-    receipt_ok = any(entry['exit_code']==0 and entry['sentinel_present'] and entry['record_id_present']
-                     and entry['text_chars']<=6000 for entry in result['native_hook_receipts'])
-    result['status'] = 'pass' if matching and set(TOOLS)<=names and receipt_ok and not result['deadline_hit'] else 'limit'
+    verified_receipts = [entry for entry in result['native_hook_receipts'] if entry['exit_code']==0 and entry['sentinel_present'] and entry['record_id_present']
+                     and entry['text_chars']<=6000 and entry.get('hook_event_name')=='SessionStart'
+                     and entry.get('source')=='startup' and entry.get('session_id')
+                     and entry.get('cwd')==str(cwd)]
+    native_ok = True
+    if harness=='claude':
+        schema_names = {name.rsplit('__',1)[-1] for request in matching for name in request['memory_schema_tools']}
+        native_ok = (result['exit_code']==1 and set(TOOLS)<=schema_names
+                     and all(request['model']==CLAUDE_MODEL and not request['effort_fields_present']
+                         and any(caller.get('cwd')==entry['cwd'] and caller.get('session_id')==entry['session_id']
+                             and caller.get('harness')==harness and caller.get('actor')==harness
+                             for caller in request['caller_contexts'] for entry in verified_receipts) for request in matching))
+    result['status'] = 'pass' if matching and set(TOOLS)<=names and verified_receipts and native_ok and not result['deadline_hit'] else 'limit'
     result['consumer_boundary'] = 'installed native hook and serialized provider request; local HTTP400 rejection'
     return result
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--harness',choices=['all','pi','codex'],default='all')
+    parser.add_argument('--harness',choices=['all','pi','codex','claude'],default='all')
     args = parser.parse_args()
     output = PACKAGE/'outputs'
     output.mkdir(exist_ok=True)
@@ -243,7 +260,7 @@ def main():
     seeded = json.loads(require([RUNTIME,str(HELPER),'seed',str(seed_path)],run_root,env)['stdout'])
     report = {'run_root':str(run_root),'actual_cli':CLI,'project':str(project),'linked_worktree':str(worktree),
               'store':str(store),'sentinel':sentinel,'record_id':seeded['id'],'seed':seeded,'harnesses':{},
-              'supported_harnesses':['codex','pi'],'historical_harnesses':{}}
+              'supported_harnesses':['codex','pi','claude'],'historical_harnesses':{}}
     previous_path = output/'native-startup-probe.json'
     if args.harness!='all' and previous_path.exists():
         previous = json.loads(previous_path.read_text())
@@ -254,14 +271,11 @@ def main():
             if retained.get('deadline_hit'):
                 retained['consumer_status'] = retained['status']
                 retained['status'] = 'limit'
-            if name=='claude':
-                retained['current_activation'] = 'excluded_by_user_scope'
-                report['historical_harnesses'][name] = retained
-            else:
-                report['harnesses'][name] = retained
-        report['historical_harnesses'].update(previous.get('historical_harnesses',{}))
-        if 'codex_hook_trust' in previous:
-            report['codex_hook_trust'] = previous['codex_hook_trust']
+            retained['current_activation'] = 'historical_evidence_only'
+            report['historical_harnesses'][name] = retained
+        for name,result in previous.get('historical_harnesses',{}).items():
+            if name!=args.harness and name not in report['historical_harnesses']:
+                report['historical_harnesses'][name] = result
     def save():
         text = json.dumps(report,indent=2)+'\n'
         (run_root/'selected-results.json').write_text(text)
@@ -282,7 +296,7 @@ def main():
         if result['exit_code'] or result['deadline_hit']:
             selected['status'] = 'limit'
         report['harnesses']['pi'] = selected; save()
-    for harness in ('codex',):
+    for harness in ('codex','claude'):
         if args.harness not in ('all',harness): continue
         home = run_root/harness; home.mkdir()
         native_env = environment(home)
@@ -298,11 +312,12 @@ def main():
                 native_env.update(CLAUDE_CONFIG_DIR=str(home),ANTHROPIC_BASE_URL=provider.url,
                                   ANTHROPIC_API_KEY='synthetic-local-only-key')
                 settings = home/'settings.json'
-                settings.write_text(json.dumps({'hooks':{'SessionStart':[{'matcher':'startup|resume|clear|compact',
+                settings.write_text(json.dumps({'autoMemoryEnabled':False,'disableClaudeAiMcp':True,
+                    'hooks':{'SessionStart':[{'matcher':'startup|resume|clear|compact',
                     'hooks':[{'type':'command','command':hook_command,'timeout':20}]}]}}))
-                mcp = home/'mcp.json'; mcp.write_text(json.dumps({'mcpServers':{'shared_memory':{
-                    'command':CLI,'args':['--root',str(store),'serve']}}}))
-                command = [binary,'--print','Synthetic startup probe. Do not run tools.','--model','claude-sonnet-4-6',
+                mcp = home/'mcp.json'; mcp.write_text(json.dumps({'mcpServers':{'shared-memory':{
+                    'type':'stdio','command':CLI,'args':['--root',str(store),'serve']}}}))
+                command = [binary,'--print','Synthetic startup probe. Do not run tools.','--model',CLAUDE_MODEL,
                     '--setting-sources','user','--settings',str(settings),'--strict-mcp-config','--mcp-config',str(mcp),
                     '--tools','','--disable-slash-commands','--no-session-persistence','--output-format','stream-json',
                     '--verbose','--include-hook-events']
@@ -336,7 +351,13 @@ tool_timeout_sec = 15
                 command = [binary,'exec','--json','--ephemeral','--ignore-rules','--cd',str(worktree),
                            'Synthetic startup probe. Do not run tools.']
             result = run(command,worktree,native_env)
-            report['harnesses'][harness] = summarize(result,provider.requests,receipt)
+            for stream in ('stdout','stderr'):
+                raw_path = run_root/(harness+'-'+stream+'.log')
+                raw_path.write_text(result[stream]); raw_path.chmod(0o600)
+            report['harnesses'][harness] = summarize(result,provider.requests,receipt,harness,worktree)
+            report['harnesses'][harness]['native_binary'] = binary
+            if harness=='claude':
+                report['harnesses'][harness]['model'] = CLAUDE_MODEL
         except Exception as exc:
             report['harnesses'][harness] = {'status':'limit','error_type':type(exc).__name__,
                                           'diagnostic':str(exc)[:800],'provider_requests':provider.requests}

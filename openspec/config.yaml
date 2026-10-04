@@ -5,8 +5,9 @@ context: |
   All artifacts must be written in en.
   Keep OpenSpec structural headings and SHALL/MUST keywords in English.
   This portable Python >=3.11 package provides a shared Markdown memory core,
-  stdio MCP through the official Python SDK, and supported Codex/Pi adapters.
-  Claude is deferred; retained adapter source is an inactive prototype only.
+  stdio MCP through the official Python SDK, and qualified Codex/Pi adapters.
+  The 2026-10-04 user request reopens native Claude qualification with Haiku;
+  qualify its existing recall adapter before narrow actual activation.
   Source belongs in this package; local runtime data is configured separately,
   initially /data/CoordExp/.shared-memory/. Native harness memories are separate.
   Supported persistence is cooperating processes on one Linux host and local
@@ -17,8 +18,10 @@ context: |
   fail closed. Agents propose candidates and explicitly validate/promote them.
   Supersession preserves evidence and never upgrades hypotheses into facts.
   Validate isolated real Codex/Pi sessions with the user-selected GPT-6-Luna
-  before enabling their actual configurations. Do not access or change actual
-  Claude configuration. Install one shared skill entry under .codex/skills;
+  before enabling their actual configurations. Claude validation uses the
+  user-selected Haiku model, without unsupported effort flags or model fallback.
+  Preserve native stores and unrelated settings in any Claude activation.
+  Install one shared skill entry under .codex/skills;
   the harnesses already share that directory through existing symlinks.
 
 # Per-artifact rules (optional)

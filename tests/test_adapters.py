@@ -1,5 +1,7 @@
 """Native hook shape fixtures, not live host qualification."""
 import io
+import copy
+import importlib.util
 import json
 from pathlib import Path
 import tempfile
@@ -36,6 +38,13 @@ class HookAdaptersTest(unittest.TestCase):
                                                                      "additionalContext": store.text}})
                     self.assertEqual(store.calls[0][0], {"cwd": "/actual/host/project", "harness": harness,
                                                         "session_id": "fixture-session", "actor": harness})
+
+    def test_claude_fork_translation_is_fixture_only(self):
+        store = Store()
+        handle_hook(store, "claude", self.event(source="fork"))
+        self.assertEqual(store.calls[0][0]["session_id"], "fixture-session")
+        with self.assertRaises(AdapterInputError):
+            handle_hook(Store(), "codex", self.event(source="fork"))
 
     def test_invalid_context_never_calls_core(self):
         for changes in ({"cwd": "relative"}, {"cwd": ""}, {"cwd": None},
@@ -105,6 +114,38 @@ class HookAdaptersTest(unittest.TestCase):
             self.assertEqual(output["hookSpecificOutput"]["additionalContext"], expected["text"])
             self.assertEqual(len(expected["items"]), 1)
             self.assertLessEqual(len(expected["text"]), 6000)
+
+
+class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
+    def test_native_acceptance_rejects_wrong_identity_schema_model_and_exit(self):
+        path = Path(__file__).with_name("native_startup_probe.py")
+        spec = importlib.util.spec_from_file_location("native_probe_fixture", path)
+        probe = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(probe)
+        caller = {"cwd": "/actual/project", "session_id": "native-session", "harness": "claude", "actor": "claude"}
+        request = {"sentinel_present": True, "record_id_present": True, "model": probe.CLAUDE_MODEL,
+                   "memory_tools": ["mcp__shared-memory__" + name for name in probe.TOOLS],
+                   "memory_schema_tools": ["mcp__shared-memory__" + name for name in probe.TOOLS],
+                   "effort_fields_present": False, "caller_contexts": [caller]}
+        receipt = {"cwd": caller["cwd"], "session_id": caller["session_id"], "hook_event_name": "SessionStart",
+                   "source": "startup", "exit_code": 0, "text_chars": 1500,
+                   "sentinel_present": True, "record_id_present": True}
+        result = {"exit_code": 1, "deadline_hit": False, "stdout": "", "stderr": ""}
+        with tempfile.TemporaryDirectory() as scratch:
+            receipt_path = Path(scratch) / "receipt.jsonl"
+            receipt_path.write_text(json.dumps(receipt) + "\n")
+            def status(actual_request=request, actual_result=result):
+                return probe.summarize(copy.deepcopy(actual_result), [actual_request], receipt_path,
+                                       "claude", caller["cwd"])["status"]
+            self.assertEqual(status(), "pass")
+            for changed in ({"model": "other"}, {"memory_schema_tools": []}, {"effort_fields_present": True},
+                            {"caller_contexts": [{**caller, "session_id": "invented"}]},
+                            {"caller_contexts": [{**caller, "actor": "fixture"}]}):
+                with self.subTest(changed=changed):
+                    self.assertEqual(status({**request, **changed}), "limit")
+            self.assertEqual(status(actual_result={**result, "exit_code": 0}), "limit")
+            receipt_path.write_text(json.dumps({**receipt, "cwd": "/other/project"}) + "\n")
+            self.assertEqual(status(), "limit")
 
 
 if __name__ == "__main__":
