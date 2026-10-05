@@ -27,7 +27,19 @@ async def seed(options):
             identifier = proposed['record']['id']
             unpack(await session.call_tool('approve',{'context':context,'id':identifier,
                 'review':{'reason':'Synthetic test fixture only','evidence':[source]},'idempotency_key':'native-promote'}))
-            recalled = unpack(await session.call_tool('context',{'context':context}))
+            routing = Path(options['root']) / 'routing'
+            routing.mkdir(exist_ok=True)
+            (routing / (proposed['record']['project_id'] + '.json')).write_text(json.dumps({
+                'version': 1, 'description': 'Synthetic navigation fixture, not scientific evidence.',
+                'topics': [{'id': 'fixture', 'title': options['sentinel'], 'when': 'During this isolated test.',
+                            'sources': [source], 'memory_ids': [identifier]}]}))
+            nav = unpack(await session.call_tool('context',{'context':context}))
+            assert nav['records_not_loaded'] and nav['items'] == [] and 'text' not in nav
+            cli_context = subprocess.run([options['cli'],'--root',options['root'],'context',
+                                         '--cwd',context['cwd'],'--harness',context['harness'],
+                                         '--session-id',context['session_id'],'--actor',context['actor']],
+                                         capture_output=True,text=True,check=True)
+            recalled = json.loads(cli_context.stdout)
             tools = await session.list_tools()
     print(json.dumps({'status':'ok','id':identifier,'text_chars':len(recalled['text']),
                       'sentinel_present':options['sentinel'] in recalled['text'],

@@ -115,7 +115,10 @@ class HookAdaptersTest(unittest.TestCase):
                     output = handle_hook(store, harness, event)
                     self.assertEqual(output["hookSpecificOutput"]["additionalContext"], expected["text"])
                     self.assertTrue(expected["text"].startswith(WORKFLOW_REMINDER + "\n<shared-memory-context>"))
-                    self.assertEqual(len(expected["items"]), 1)
+                    self.assertEqual(expected["items"], [])
+                    self.assertTrue(expected["records_not_loaded"])
+                    self.assertNotIn("Native stores remain separate.", expected["text"])
+                    self.assertEqual(store.read(caller, [proposed["record"]["id"]])["items"][0]["body"], "Native stores remain separate.")
                     self.assertLessEqual(len(expected["text"]), 6000)
 
 

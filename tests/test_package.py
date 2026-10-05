@@ -42,7 +42,7 @@ async def verify():
    logo=files('shared_memory_mcp').joinpath('assets/logo.svg').read_bytes()
    assert base64.b64decode(icon.src.split(',',1)[1])==logo
    assert initialized.serverInfo.websiteUrl=='https://github.com/Pein2017/shared-memory-mcp'
-   assert {t.name for t in tools.tools}=={'context','search','read','create','approve','update','delete'}
+   assert {t.name for t in tools.tools}=={'context','search','read','create','approve','update','delete','capture','curate'}
    assert all(t.title and t.icons==initialized.serverInfo.icons for t in tools.tools)
    print(json.dumps({'module':shared_memory_mcp.__file__,'version':version('shared-memory-mcp'),'logo':base64.b64encode(logo).decode(),'tools':len(tools.tools)}))
 asyncio.run(verify())
@@ -54,5 +54,5 @@ asyncio.run(verify())
     assert verified.returncode == 0, verified.stdout+verified.stderr
     receipt = json.loads(verified.stdout)
     assert Path(receipt['module']).is_relative_to(installed)
-    assert receipt['version'] == '0.2.0' and receipt['tools'] == 7
+    assert receipt['version'] == '0.2.0' and receipt['tools'] == 9
     assert base64.b64decode(receipt['logo']) == packaged_logo.read_bytes()

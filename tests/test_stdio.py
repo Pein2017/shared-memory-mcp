@@ -42,10 +42,14 @@ def test_installed_stdio_roundtrip(tmp_path):
                 assert server_icon.mimeType == 'image/svg+xml'
                 assert base64.b64decode(server_icon.src.split(',',1)[1]) == packaged_logo.read_bytes()
                 tools = await session.list_tools()
-                assert {tool.name for tool in tools.tools} == {'context','search','read','create','approve','update','delete'}
+                assert [tool.name for tool in tools.tools] == ['context','search','read','create','approve','update','delete','capture','curate']
+                assert (await session.list_tools()).model_dump() == tools.model_dump()
                 for tool in tools.tools:
                     assert tool.title and tool.icons == initialized.serverInfo.icons
                     assert 'context' in tool.inputSchema['required']
+                    assert tool.annotations.readOnlyHint == (tool.name in {'context','search','read'})
+                    assert tool.annotations.idempotentHint is True
+                    assert tool.annotations.openWorldHint is False
                 descriptions = {tool.name:tool.description.lower() for tool in tools.tools}
                 for name, terms in {
                     'context': ('fresh','start/resume','caller'),
@@ -74,7 +78,12 @@ def test_installed_stdio_roundtrip(tmp_path):
                 assert payload['items'][0]['body'] == record['body']
                 contextual = await session.call_tool('context',{'context':context,'max_chars':6000})
                 assert not contextual.isError, contextual
-                assert len((contextual.structuredContent or json.loads(contextual.content[0].text))['text']) <= 6000
+                nav = contextual.structuredContent or json.loads(contextual.content[0].text)
+                assert 'text' not in nav and nav['items'] == [] and nav['records_not_loaded']
+                assert nav['caller_context'] == {**context,'project_id':'demo'}
+                assert 'review' not in payload['items'][0]
+                audited = await session.call_tool('read',{'context':context,'ids':[identifier],'audit':True})
+                assert (audited.structuredContent or json.loads(audited.content[0].text))['items'][0]['review']
                 successor = await session.call_tool('create',{'context':context,'record':{**record,'body':'Updated hypothesis; still needs evidence.'},'idempotency_key':'sdk-successor'})
                 assert not successor.isError, successor
                 successor_id = (successor.structuredContent or json.loads(successor.content[0].text))['record']['id']
@@ -89,4 +98,12 @@ def test_installed_stdio_roundtrip(tmp_path):
                 assert (hidden.structuredContent or json.loads(hidden.content[0].text))['items'] == []
                 history = await session.call_tool('read',{'context':context,'ids':[identifier,marker['id']],'include_inactive':True})
                 assert [r['effective_status'] for r in (history.structuredContent or json.loads(history.content[0].text))['items']] == ['withdrawn','withdrawal']
+                captured = await session.call_tool('capture',{'context':context,'record':record,'review':review,'details':{'domain':'engineering'},'idempotency_key':'stdio-capture'})
+                assert not captured.isError
+                captured_data = captured.structuredContent or json.loads(captured.content[0].text)
+                assert captured_data['effective_status'] == 'active'
+                retired = await session.call_tool('curate',{'context':context,'id':captured_data['id'],'review':review,'retired':True,'idempotency_key':'stdio-retire'})
+                assert not retired.isError
+                hidden = await session.call_tool('read',{'context':context,'ids':[captured_data['id']]})
+                assert (hidden.structuredContent or json.loads(hidden.content[0].text))['items'] == []
     asyncio.run(call_sequence())

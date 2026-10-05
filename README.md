@@ -25,13 +25,16 @@ shared-data-root/
 ├── records/
 │   └── <stable-project-id>/
 │       └── <record-id>.md
+├── routing/<stable-project-id>.json
+├── curation/<stable-project-id>/<record-id>.json
+├── sharing.json                    # optional directional engineering allowlist
 ├── .writer-gate.sqlite3
 └── .state/
     ├── adapters/shared-memory.ts
     └── config-backups/
 ```
 
-Markdown holds knowledge and replay identities; SQLite serializes cooperating local writers and records operation receipts. SQLite and file publication are not one transaction: canonical operation metadata supports recovery after publication precedes receipt commit.
+Markdown holds captured content and publication replay identities. Optional JSON curation journals bind reviewed recall metadata to the exact record content digest without rewriting its Markdown. SQLite only serializes cooperating local writers; replay receipts live in published files, not the lock database. Atomic file publication and idempotent operation stages provide recovery after interruption.
 
 One accepted successor contains `supersedes` links. Old records remain intact; effective superseded status is derived from the full project corpus before query ranking. Expiring a successor does not restore its predecessor.
 
@@ -73,23 +76,25 @@ Claude installation preserves its default model, native-memory settings, other h
 
 Startup recall supplies a bounded `<shared-memory-context>` view with actual `caller_context`. Supply that context to MCP tools rather than inventing a session ID or using the server cwd.
 
-A fixed source-owned reminder precedes the recalled-record wrapper and shares its total character budget. It is delivered even when a registered project has no matching active records; scope failures still inject nothing. It points to the single [shared-memory skill](skills/shared-memory/SKILL.md), which owns proactive task/topic retrieval, semantic candidate capture and reviewed corrections. For project navigation, query `shared memory topic map` when one exists; default startup ranking does not prioritize that record automatically.
+A fixed reminder precedes the bounded wrapper. Empty-query startup reads curated routing and actual caller identity, not record bodies, their age order, dynamic counts or an inferred task. Missing routing is explicit; scope failure injects nothing. The single [shared-memory skill](skills/shared-memory/SKILL.md) defaults to targeted recall after a nontrivial task is known, without a mandatory search gate or per-turn injection. Agents may open an existing owner directly.
 
-MCP initialization and operation descriptions expose the workflow entry and use triggers. Delegation briefs identify recall/capture duties and the designated consolidator. A worker without its own native caller context returns source-linked candidate content to the lead rather than copying the parent's identity. These instructions improve discovery and deterministic delivery; they cannot guarantee model compliance or enforce reviewer roles.
+MCP has static tool order/descriptions and explicit effect annotations; these are client hints, not authorization. Startup and task results use the same core, but MCP `context` omits a duplicate rendered text representation, and `read` omits operation receipts unless `audit=true`. Native adapters still receive their text renderer. A worker without its own caller context returns source-linked proposed content rather than copying a parent's identity.
 
 | Tool | Purpose |
 | --- | --- |
-| `context` | Fresh bounded startup/task view |
-| `search` | Scoped lexical listings within a 12,000-byte response budget |
-| `read` | Full records by ID; optional historical visibility |
+| `context` | Stable startup navigation, or task cards for an explicit query |
+| `search` | Field-aware lexical cards, routes, match reasons and revision-fenced pagination |
+| `read` | Full bodies, sources and conditions; history and detailed audit on request |
 | `create` | Candidate capture with a source-event idempotency key |
 | `approve` | Explicit review, preserving the captured content |
 | `update` | Publish successor candidate `id`, retiring exact-scope `old_ids` |
 | `delete` | Reviewed withdrawal of one record; retain original contents and audit history |
+| `capture` | One-call capture; supplied source review publishes, otherwise keep a candidate |
+| `curate` | Reviewed metadata/sharing or retirement from default recall; preserve original bytes |
 
-Pi exposes these seven tools directly. Native namespaces may prefix their names, for example `mcp__shared_memory__update`. Codex may expose MCP tools through its native deferred discovery/code-mode catalog; absence from the initial direct tool list does not mean the server is disconnected.
+Pi exposes these nine tools directly; the seven existing operation names remain available. Native namespaces may prefix their names, for example `mcp__shared_memory__update`. Codex may expose MCP tools through its native deferred discovery/code-mode catalog; absence from the initial direct tool list does not mean the server is disconnected.
 Version 0.2 replaces the old `memory_context/search/read/propose/promote/supersede` names with the names above. Reconnect MCP clients or start fresh sessions to refresh tool catalogs. There are no legacy aliases. Server/tool icons are embedded SVG metadata; the shared skill also supplies its own local logo. Actual rendering depends on client support.
-Search keeps complete short bodies when they fit. Larger bodies are omitted with explicit size information; use `memory_read` for the complete record. Listings preserve source and provenance fields or omit the whole item when it cannot fit. The response reports omitted matches. The 12,000-byte bound covers the core JSON envelope; MCP may encode it as both text and structured content.
+Search returns source-linked cards, not full review/proposal envelopes. A reviewed summary can be self-contained; legacy long bodies use explicitly incomplete previews. Oversized cards retain an ID and read pointer rather than silently hiding a match. `read` recovers every original body/source/provenance field; `audit=true` includes review and curation history. Follow next_offset with expected_revision=corpus_revision; a changed corpus/query requires a fresh search. The 12,000-byte bound covers escaped/indented JSON as well as the ordinary core projection. The official SDK still provides both structured content and an interoperable text fallback; clients may expose both, so the combined transport is not advertised as 12,000 bytes.
 
 A proposal has:
 
@@ -105,15 +110,29 @@ A proposal has:
 }
 ```
 
-Kinds are observation, evidence, hypothesis, decision, experiment, result, invariant, bug/root-cause, and handoff. Captures start as candidates. Promotion requires `review={reason,evidence}`; the main agent/designated consolidator validates the original sources and respects existing user-owned scientific and decision boundaries. Active means eligible for recall, not established truth.
+Existing record kinds remain readable. `capture` accepts the same record plus optional details and review={reason,evidence}. A source-checking authorized agent may publish low-risk material in one call; omitted review leaves a candidate. Details can carry a summary, conditions, domain/topics/aliases, statement_type, observed_at, source_roles and sparse source-linked relations. These are optional, not a research ontology. A published hypothesis remains a hypothesis. Source validation is structural; review is caller-supplied and does not certify truth or grant execution rights.
 
 Use project scope for durable shared knowledge, worktree scope for local continuation, and task scope when a real task ID is supplied. Worktree IDs represent canonical checkout paths, not branch identities. Available Git commit/branch are captured as origin provenance; they do not automatically invalidate a record on every new commit or branch switch. Version-specific statements must retain their conditions/source revisions and be revalidated before consequential use.
 
-Capture at meaningful decisions, conclusions, failures/root causes, and handoffs. Ordinary tool activity and recalled summaries create no records. Repeated recollection does not count as independent corroboration. Existing research/OpenSpec/artifact owners remain authoritative; keep memory compact and link to them.
+Capture non-obvious durable lessons and conditional findings, not implementation changelogs or whole handoffs. Handoff transport/workflow stays independent; extract worthwhile content separately only when needed. Repeated summaries are not independent evidence. Existing research/OpenSpec/code/artifact owners remain authoritative. Use source_roles to distinguish owner, evidence, derivative and origin. Historical observations retain their conditions and event date; version-related operational statements require current-source checks rather than automatic age decay.
 
 To correct knowledge: `create` a successor candidate, check its sources, then `update` with the new candidate ID, old IDs, review and operation key. `update` publishes the reviewed successor; it does not edit an old body in place. To withdraw knowledge without a replacement: `delete` with the target ID, source-linked review and operation key. It appends a withdrawal marker and hides both marker and target from normal recall. `read/search(include_inactive=true)` retain their history. Withdrawn candidates cannot be approved. Withdrawing a successor never reactivates its predecessors; restore knowledge with a new candidate and review. Delete is logical withdrawal, not physical erasure.
 
 Same operation key and payload replay the original publication. Reusing a key for different content fails. Promotion cannot rewrite accepted content. Supersession requires the same project and exact scope qualifiers. Optional UTC `expires_at` removes temporary material from normal recall; history remains available.
+
+## Routing, sharing and retirement
+
+`routing/<project>.json` contains version=1, a short description and topics with id/title/when/sources plus optional aliases, search_terms and memory_ids. Owner links remain useful without local memory IDs. Aliases discover a topic; **only explicit search_terms expand a query**. Co-membership in a broad topic is not synonymy. Ranking uses meaningful word/identifier/CJK matches, field weights, term rarity and length normalization; Latin character fragments alone do not admit records. Domain is only a soft preference; relevance is not evidence strength. No embeddings, mandatory index or per-topic synthesis is required.
+
+Optional `sharing.json` has `{"version":1,"allow":[{"from":"project-a","to":"project-b","domain":"engineering"}]}`. The target receives a foreign record only when it is published, project-scoped, not retired, and separately curated with domain=engineering and share_with=["project-b"]. Imported reads retain project-a attribution; mutations never inherit imported visibility. No implicit research, candidate, worktree, task or historical-record export occurs.
+
+`curate(..., retired=true, review=..., idempotency_key=...)` removes default recall without declaring a record false. The original Markdown remains intact and history reads remain available. Supply expected_content_digest and expected_revision from a full read to fence a reviewed change. Clearing retirement cannot revive underlying expiry, withdrawal or supersession. Correcting the same claim can use update; differing experiment conditions or interpretations may simply coexist.
+
+Curation is a bounded, digest-bound operation journal, not an independent evidence store. Exact replay recovers interrupted operations; changed reuse fails. Capture binds its complete request in a small atomic receipt under `capture/<project>/` before creating a candidate. An interruption can leave only that receipt or an unpublished candidate; retry the identical payload and key. Completed pre-repair captures recover their binding from the curation journal. A pre-repair candidate without that binding fails with `incomplete_capture`; its original review/details cannot safely be inferred.
+
+Older running processes do not hot-reload source, tool schemas or curation behavior. An intermediate reader that rejects newly added routing fields such as `search_terms` can fail recall instead of merely returning an older view. Reconnect the affected client, or use the fresh CLI public-operation bridge; do not remove valid routing metadata to satisfy a stale reader. This migration does not rewrite version-1 records or restart sessions. Refresh all consumers before producing new canonical records with caller kinds that an older release does not recognize, including webcodex.
+
+For WebCodex without a configured MCP gateway, the same nine public operations are available through `shared-memory --root <store> call --tool <operation>` with JSON arguments on stdin. Use harness=webcodex, the actual Workflow Session and verified process cwd. The bridge returns the same compact MCP projection; the native `context` subcommand still renders hook text. This does not register a new Runner service or substitute WebCodex's separate memory bootstrap.
 
 ## Record format and audit
 
@@ -121,12 +140,12 @@ Each UTF-8 Markdown file starts with one fenced JSON metadata block, then the re
 
 The write gateway maintains serialization, digests, and lifecycle invariants. Inspect/diff canonical Markdown freely; use a successor for corrections instead of hand-editing accepted records. Metadata validates structure and replay consistency; it does not authenticate authors or establish scientific truth.
 
-Track canonical files and registry configuration with Git if desired. Git is user-controlled history/sync, not a concurrent writer lock. Rebind local project roots after moving a store. Project knowledge transfers by stable project ID; checkout/task continuation needs deliberate rebinding or fresh records.
+Keep raw/candidate/operational records, curation audit, local registry/sharing bindings, backups and derived state outside Git by default. Selected curated routing may be tracked by the existing owner repository; no new repository or automatic Git operation is needed. Git is not a concurrent writer lock. Rebind local roots deliberately when moving a store; worktree/task applicability does not silently follow renamed checkouts.
 
 ## Operational limits
 
 - Supported writers cooperate on one Linux host and a local filesystem. Network-shared filesystems, multiple hosts, and unrestricted concurrent external editors are unqualified.
-- Recall scans canonical project files, with a 10,000-record project ceiling and a 1 MiB record ceiling. Exceeding a bound fails explicitly. Startup text defaults to eight records/6,000 Unicode characters with omission counts. Whole records that cannot fit are omitted, preserving conditions and source pointers. Explicit full reads are intentionally outside the compact search/startup budgets.
+- Task recall scans canonical project files, with a 10,000-record project ceiling and a 1 MiB record/journal ceiling. Exceeding a bound fails explicitly. Startup defaults to eight routing entries/6,000 Unicode characters; it reports entries not shown and does not scan record bodies. Whole routing/card entries that cannot fit are skipped without truncating their meaning. Full reads are intentionally outside compact search/startup budgets.
 - Lexical search can miss synonyms. A rebuildable FTS cache is a later option; freshness must include corpus membership and supersession edges, not just returned-file timestamps.
 - Provenance and review references are self-reported cooperating-agent metadata. Source validation is syntactic; semantic review remains the agent/user owner's responsibility.
 - Claude/Codex startup/resume/clear/compact hooks append bounded current snapshots. They cannot erase earlier conversation history or compacted summaries. Pi inserts one ephemeral user-level snapshot before ordinary conversation, after any leading system messages exposed by the caller. Unchanged recall stays at that position during ordinary growth; startup/resume/compact and caller-identity changes refresh it, and failed refresh removes it. Native Pi history is unchanged. Real-model resume/compaction and Claude fork sessions remain unmeasured; event envelopes are source/fixture checked.
@@ -141,7 +160,7 @@ shared-memory --root /path/to/central-memory context \
   --cwd /path/to/project --harness codex --session-id actual-session-id --actor main
 ```
 
-Unknown/ambiguous scope produces empty startup recall and a diagnostic. Malformed canonical records fail explicitly. Missing coordination state can be reconciled from canonical operation identities; stop all writers before removing or replacing the coordination database. It is operational state, not a disposable live search cache. Unpublished temporary files are not knowledge.
+Unknown/ambiguous scope produces empty startup recall and a diagnostic. Navigation declares records_not_loaded; task search/read and doctor validate canonical records and curation and fail explicitly on corruption. Missing coordination state can be reconciled from canonical operation identities; stop all writers before removing or replacing the coordination database. It is operational state, not a disposable live search cache. Unpublished temporary files are not knowledge.
 
 Rollback removes only the `shared-memory` MCP entries, the exact owned SessionStart commands, the owned Codex trust key, the configured Pi extension path, and the matching shared skill symlink. Claude's owned entries are in its `settings.json` and user `.claude.json`. Leave canonical records and unrelated settings intact. Backups identify each original configuration; avoid restoring an entire old configuration over later user changes.
 
@@ -149,9 +168,9 @@ Rollback removes only the `shared-memory` MCP entries, the exact owned SessionSt
 
 - Unit/consumer tests cover project/worktree/task isolation, collisions, concurrent writers, crash recovery, idempotency, supersession/expiry, provenance, corruption, budgets, and native hook envelopes.
 - Official SDK stdio clients exercise capture/review and fresh-process recall.
-- Installed Claude/Codex startup injection is verified in serialized requests against a local rejecting test provider. Installed Pi Web SDK 1.0.0 and managed CLI SDK 1.0.3 verify the ordinary-growth converted prefix, user-level recall, replacement, lifecycle freshness, failure clearing and unchanged native history without inference. The real CLI/MCP probe also checks prefix preservation through the installed loader/session dispatch and `convertToLlm`.
-- Three real GPT-6-Luna sessions verify Codex capture, Pi cross-read/capture, and fresh Codex cross-read. They use isolated stores/projects and preserve actual session provenance.
-- Two real native Haiku sessions verify startup consumption, peer fixture reads, explicit reviewed publication, and fresh-session recall. Independent Codex/Pi SDK clients read the same Claude publication; these are synthetic peer clients, not additional paid Codex/Pi sessions. Native init/assistant events verify the exact `claude-haiku-4-5-20251001` model and origin session.
+- Installed Claude/Codex startup injection is verified in serialized requests against a local rejecting test provider. Installed Pi Web and managed CLI SDK 1.0.3 consumers verify the ordinary-growth converted prefix, user-level recall, replacement, lifecycle freshness, failure clearing and unchanged native history without inference. The real CLI/MCP probe also checks prefix preservation through the installed loader/session dispatch and `convertToLlm`.
+- Historical pre-curation qualification used three real GPT-6-Luna sessions for Codex capture, Pi cross-read/capture and fresh Codex cross-read. It does not qualify the new recall/publication contract or prove agent compliance. This upgrade adds CPU, actual stdio MCP and installed Pi SDK tests with zero model/provider calls.
+- Historical pre-curation native Haiku qualification used two sessions for startup consumption, peer fixture reads, explicit reviewed publication and fresh-session recall. Independent Codex/Pi SDK clients read the same Claude publication; these are synthetic peer clients, not additional paid Codex/Pi sessions. Native init/assistant events verify the exact `claude-haiku-4-5-20251001` model and origin session.
 - Wheel installation is checked from outside this source tree; the core works when MCP imports are blocked.
 
 Run local tests with `python -m pytest -q` after installing the checkout. Native CPU probe: `python tests/native_startup_probe.py --harness all` (Claude/Codex/Pi). It requires installed harnesses and does not call a real model provider.
@@ -161,5 +180,7 @@ Run the Pi adapter regression against an installed SDK with `PI_SDK_ROOT=/path/t
 Explicit paid Haiku qualification: `python tests/claude_haiku_probe.py --live --claude-dir /path/to/existing/claude-config`. It permits two sessions capped at USD 1 each, uses an existing unexpired access token only in child environment, and copies no refresh token. The ordinary test suite never runs it. Haiku effort metadata is absent; the test omits effort/fallback flags and does not use `--bare`, which disables startup hooks.
 
 After installation, native Haiku usage is `claude --print --model claude-haiku-4-5-20251001 -- "Your task"`. To check the actual configured startup without inference, use `python tests/claude_haiku_probe.py --actual-startup --claude-dir /path/to/claude-config --actual-cwd /path/to/registered-project --memory-root /path/to/central-memory`. This uses a local rejecting provider and disables auto-memory/account MCP only for that test invocation; stored native settings are preserved.
+
+The current [recall and curation change](openspec/changes/improve-memory-recall-and-lifecycle/proposal.md) records the new navigation, publication, migration and compatibility contract. Live migration receipts remain private under the store's `.state/migrations/`; future dreaming can reuse record enumeration, source identities, derivation metadata and idempotent operations without adding a scheduler now.
 
 The owning changes are the [initial core/Codex/Pi implementation](openspec/changes/build-shared-memory-mcp/proposal.md), [Claude qualification](openspec/changes/qualify-claude-haiku/proposal.md), [direct tools, withdrawal and branding](openspec/changes/simplify-memory-tools-and-branding/proposal.md) and [stable Pi recall prefix](openspec/changes/stabilize-pi-context-prefix/proposal.md). Local validation receipts live under ignored `outputs/`; they are implementation evidence, not research results.

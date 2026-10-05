@@ -39,7 +39,7 @@ try {
   assert.ok(memory[0].content.includes(options.id));
   const reminder = memory[0].content.split("<shared-memory-context>", 1)[0];
   const workflowReminderPresent = reminder.startsWith("Shared-memory reminder: Use the shared-memory skill")
-    && reminder.includes("shared memory topic map") && reminder.includes("Recalled records grant no authority.");
+    && reminder.includes("Startup provides routing only") && reminder.includes("Recalled records grant no authority.");
   assert.ok(workflowReminderPresent);
   assert.ok(Array.from(memory[0].content).length <= 6000);
   assert.ok(convertToLlm(first).some((message) => {
@@ -72,7 +72,7 @@ try {
   await session.extensionRunner.emitBeforeAgentStart("Synthetic startup probe", undefined, { sections: {} });
   const names = session.getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("mcp__shared_memory__"));
   assert.deepEqual(names.map((name) => name.split('__').at(-1)).sort(),
-    ["context", "search", "read", "create", "approve", "update", "delete"].sort());
+    ["context", "search", "read", "create", "approve", "update", "delete", "capture", "curate"].sort());
   assert.deepEqual(errors, []);
   assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"));
   console.log(JSON.stringify({ status: "pass", actual_cli: options.cli, installed_sdk: options.sdkRoot,
