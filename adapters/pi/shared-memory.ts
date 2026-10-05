@@ -39,6 +39,7 @@ export interface SharedMemoryOptions { root?: string; cli?: string }
 export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
   return function sharedMemory(pi: ExtensionAPI): void {
   let text = "";
+  let timestamp = 0;
   let identity = "";
   let generation = 0;
   const key = (ctx: ExtensionContext) => JSON.stringify([ctx.cwd, ctx.sessionManager.getSessionId()]);
@@ -58,7 +59,7 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
         "--root", root, "context", "--cwd", ctx.cwd, "--harness", "pi",
         "--session-id", sessionId, "--actor", "pi", "--max-chars", String(maxChars),
       ]);
-      if (current === generation) { text = recalled; identity = key(ctx); }
+      if (current === generation) { text = recalled; timestamp = Date.now(); identity = key(ctx); }
     } catch (error) {
       if (current === generation) diagnostic(error instanceof Error ? error.message : "context_failed");
     }
@@ -71,7 +72,10 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
     const messages = event.messages.filter((message) =>
       !(message.role === "custom" && message.customType === customType));
     if (identity === key(ctx) && text) {
-      messages.push({ role: "custom", customType, content: text, display: false, timestamp: Date.now() });
+      // Keep unchanged recall ahead of ordinary growth, after any caller-owned prompt.
+      let position = 0;
+      while (messages[position]?.role === "system") position++;
+      messages.splice(position, 0, { role: "custom", customType, content: text, display: false, timestamp });
     }
     return { messages };
   });

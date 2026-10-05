@@ -50,6 +50,24 @@ try {
   // Repeated request context must replace one message without reconnecting MCP.
   const replaced = await session.extensionRunner.emitContext(first);
   assert.equal(replaced.filter((message) => message.customType === "shared-memory-context").length, 1);
+  const system = { role: "system", content: "Synthetic host prompt", timestamp: 0 };
+  const historyBeforeContext = structuredClone(manager.getEntries());
+  const prefix = await session.extensionRunner.emitContext([system, ...first]);
+  const convertedPrefix = convertToLlm(prefix);
+  const continuation = [
+    { role: "assistant", content: [{ type: "toolCall", id: "fixture-call", name: "fixture", arguments: {} }], timestamp: 2 },
+    { role: "toolResult", toolCallId: "fixture-call", toolName: "fixture", content: [{ type: "text", text: "fixture result" }], isError: false, timestamp: 3 },
+    { role: "user", content: "Synthetic continuation", timestamp: 4 },
+  ];
+  const grown = await session.extensionRunner.emitContext([...prefix, ...continuation]);
+  assert.deepEqual(convertToLlm(grown).slice(0, convertedPrefix.length), convertedPrefix,
+    "ordinary conversation growth preserves the entire converted prefix");
+  assert.deepEqual(convertToLlm(grown).slice(convertedPrefix.length), continuation);
+  assert.deepEqual(grown[0], system);
+  assert.equal(grown[1].customType, "shared-memory-context");
+  assert.equal(convertToLlm(grown)[1].role, "user");
+  assert.equal(grown.filter((message) => message.customType === "shared-memory-context").length, 1);
+  assert.deepEqual(manager.getEntries(), historyBeforeContext, "context transforms leave native history unchanged");
   // Dispatch the real startup wait boundary without launching agent.prompt or a provider.
   await session.extensionRunner.emitBeforeAgentStart("Synthetic startup probe", undefined, { sections: {} });
   const names = session.getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("mcp__shared_memory__"));
@@ -61,6 +79,8 @@ try {
     sentinel_present: true, record_id_present: true, workflow_reminder_present: workflowReminderPresent,
     text_chars: Array.from(memory[0].content).length,
     shared_memory_messages: 1, mcp_tools: names, model_calls: 0, provider_calls: 0,
+    ordinary_growth_prefix_preserved: true, leading_system_preserved: true, recall_role: "user",
+    cache_claim: "CPU prefix correctness only; provider cache behavior unmeasured",
     boundary: "installed loader/session/event dispatch, real CLI context, real built-in MCP stdio connection, convertToLlm" }));
 } finally {
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });
