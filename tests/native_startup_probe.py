@@ -24,7 +24,7 @@ from shared_memory_mcp.core import WORKFLOW_REMINDER
 PACKAGE = Path(__file__).resolve().parents[1]
 CLI = '/data/CoordExp/.shared-memory/.venv/bin/shared-memory'
 RUNTIME = str(Path(CLI).with_name('python'))
-PI_SDK = '/root/.nvm/versions/node/v22.22.0/lib/node_modules/@earendil-works/pi-coding-agent'
+PI_SDK = os.environ.get('PI_SDK_ROOT', str((PACKAGE.parent/'pi-web/node_modules/@earendil-works/pi-coding-agent').resolve()))
 HELPER = PACKAGE / 'tests/native/startup_helpers.py'
 TOOLS = ['context','search','read','create','approve','update','delete','capture','curate']
 CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
@@ -255,9 +255,10 @@ def summarize(result, requests, receipt, harness, cwd):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--harness',choices=['all','pi','codex','claude'],default='all')
+    parser.add_argument('--output-dir',type=Path,default=PACKAGE/'outputs',help='Keep each qualification report at its own evidence owner')
     args = parser.parse_args()
-    output = PACKAGE/'outputs'
-    output.mkdir(exist_ok=True)
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True,exist_ok=True)
     run_root = Path(tempfile.mkdtemp(prefix='native-startup-',dir=output))
     project, store = run_root/'project', run_root/'memory'
     project.mkdir()

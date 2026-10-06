@@ -217,6 +217,20 @@ class MemoryStore:
         return {'status':'registered','project':merged}
 
     def _resolve(self, context):
+        try:
+            return self._resolve_scope(context)
+        except MemoryError as exc:
+            from .onboarding import SCOPE_ERRORS, diagnostic_text, discovery
+            if exc.code in SCOPE_ERRORS and isinstance(context, dict):
+                project = discovery(self, context.get('cwd'), context.get('project_id'))
+                hint = diagnostic_text(project)
+                exc.diagnostic = {'code': exc.code, 'message': str(exc), 'project': project}
+                if hint:
+                    exc.diagnostic['onboarding'] = hint
+                    exc.args = (str(exc) + '\n' + hint,)
+            raise
+
+    def _resolve_scope(self, context):
         _keys(context, {'cwd','harness','session_id','actor'}, {'cwd','harness','session_id','actor','task_id','project_id'}, 'context')
         if not isinstance(context['cwd'],str) or not Path(context['cwd']).is_absolute():
             _fail('invalid_input','context.cwd must be absolute')
@@ -243,12 +257,17 @@ class MemoryStore:
                 _fail('ambiguous_scope' if selected else 'unmapped_scope','No unique registered project for cwd')
             entry = selected[0]
             project_root = git_root
-        if context.get('project_id',entry['id']) != entry['id']:
-            _fail('scope_hint_mismatch','project_id hint disagrees with resolved cwd')
         # A nested independent Git repo does not inherit a parent project binding.
         explicit_git_subdirectory = bool(explicit and git_root and project_root != git_root and _within(Path(project_root),Path(git_root)))
         if common and common not in entry['git_common_dirs'] and not explicit_git_subdirectory:
-            _fail('unmapped_scope','Nested independent Git repository requires explicit registration')
+            known = [p for p in registry['projects'] if common in p['git_common_dirs']]
+            if len(known) > 1:
+                _fail('ambiguous_scope','Git identity matches conflicting registered projects')
+            if not known or project_root == git_root:
+                _fail('unmapped_scope','Nested independent Git repository requires explicit registration')
+            entry, project_root = known[0], git_root
+        if context.get('project_id',entry['id']) != entry['id']:
+            _fail('scope_hint_mismatch','project_id hint disagrees with resolved cwd')
         worktree_root = git_root or project_root
         scope = {'project_id':entry['id'],'worktree_id':hashlib.sha256(worktree_root.encode()).hexdigest()[:24], 'cwd':str(cwd)}
         if context.get('task_id'):
@@ -258,6 +277,15 @@ class MemoryStore:
     def resolve(self, context):
         with self._gate():
             return self._resolve(context)
+
+    def project(self, cwd, project_id=None):
+        from .onboarding import discovery
+        with self._gate():
+            return discovery(self, cwd, project_id)
+
+    def _admit(self, record):
+        if record['kind'] == 'handoff':
+            _fail('unsupported_kind', 'New handoff memory and unfinished handoff publication are disabled; local handoff documents remain supported. Capture reusable source-linked findings separately.')
 
     def _record_input(self, record):
         _keys(record, {'kind','title','body','scope','sources'}, {'kind','title','body','scope','sources','expires_at'}, 'record')
@@ -440,6 +468,7 @@ class MemoryStore:
             prior = self._retry(records,'proposal',idempotency_key,digest)
             if prior:
                 return self._result(prior,records,True)
+            self._admit(record)
             r = {**record,'version':1,'id':uuid.uuid4().hex,'project_id':scope['project_id'],'status':'candidate','created_at':_now(),'provenance':{key:context[key] for key in ('cwd','harness','session_id','actor')},'proposal':{'key':idempotency_key,'digest':digest}}
             r['provenance']['cwd'] = scope['cwd']
             git_locator = _git_locator(scope['cwd'])
@@ -476,6 +505,7 @@ class MemoryStore:
             r = by_id.get(id)
             if not r or not self._visible(r,scope):
                 _fail('not_found','Record is not visible in resolved scope')
+            self._admit(r)
             if r['status'] != 'candidate':
                 _fail('immutable_record','Accepted records cannot be reviewed or edited again')
             if r['effective_status'] == 'expired':
@@ -576,7 +606,7 @@ class MemoryStore:
             return self._context(context,query,limit,max_chars)
         except MemoryError as exc:
             status = 'unmapped' if exc.code in ('unmapped_scope','uninitialized') else 'ambiguous' if exc.code == 'ambiguous_scope' else 'invalid'
-            return {'status':status,'scope':None,'items':[],'text':'','omitted':0,'truncated':False,'diagnostic':{'code':exc.code,'message':str(exc)}}
+            return {'status':status,'scope':None,'items':[],'text':'','omitted':0,'truncated':False,'diagnostic':getattr(exc,'diagnostic',{'code':exc.code,'message':str(exc)})}
 
     def _context(self, context, query='', limit=8, max_chars=6000):
         from .recall import context_view

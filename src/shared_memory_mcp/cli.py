@@ -49,6 +49,9 @@ def main(argv=None):
     registration = commands.add_parser('register')
     registration.add_argument('--project-id',required=True)
     registration.add_argument('--project-root',action='append',required=True)
+    project = commands.add_parser('project', help='Read-only cwd/Git project discovery and existing registration hints')
+    project.add_argument('--cwd', required=True)
+    project.add_argument('--project-id')
     commands.add_parser('doctor')
     recall = commands.add_parser('context')
     _add_context(recall)
@@ -67,6 +70,8 @@ def main(argv=None):
             result = store.init()
         elif args.command == 'register':
             result = store.register(args.project_id,args.project_root)
+        elif args.command == 'project':
+            result = store.project(args.cwd, args.project_id)
         elif args.command == 'doctor':
             result = store.doctor()
         elif args.command == 'context':
@@ -89,12 +94,12 @@ def main(argv=None):
             serve(store)
             return 0
         print(json.dumps(result,ensure_ascii=False))
-        if (args.command == 'context' or args.command == 'call' and args.tool == 'context') and result.get('status') != 'ok':
+        if (args.command in ('context','project') or args.command == 'call' and args.tool == 'context') and result.get('status') != 'ok':
             print('shared-memory: '+result['diagnostic']['code'],file=sys.stderr)
             return 2
         return 0
     except MemoryError as exc:
-        diagnostic = {'code':exc.code,'message':str(exc)}
+        diagnostic = getattr(exc, 'diagnostic', {'code':exc.code,'message':str(exc)})
         if args.command == 'context':
             status = 'unmapped' if exc.code in ('unmapped_scope','uninitialized') else 'ambiguous' if exc.code == 'ambiguous_scope' else 'invalid'
             print(json.dumps({'status':status,'scope':None,'items':[],'text':'','omitted':0,'truncated':False,'diagnostic':diagnostic},ensure_ascii=False))

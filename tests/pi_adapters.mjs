@@ -10,7 +10,7 @@ assert.ok(sdkRoot, "Set PI_SDK_ROOT to the installed @earendil-works/pi-coding-a
 const { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } =
   await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
 const { convertToLlm } = await import(pathToFileURL(join(sdkRoot, "dist/core/messages.js")).href);
-const extension = resolve("adapters/pi/shared-memory.ts");
+const extension = resolve(process.env.SHARED_MEMORY_TEST_PI_EXTENSION ?? "adapters/pi/shared-memory.ts");
 const scratch = await mkdtemp(join(tmpdir(), "shared-memory-pi-test-"));
 const project = join(scratch, "actual-host-project");
 const agentDir = join(scratch, "agent");
@@ -122,13 +122,36 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   await session.extensionRunner.emitContext(messages);
   assert.equal((await readFile(calls, "utf8")).trim().split("\n").length, failedRefreshCalls,
     "failed refresh stays empty without retrying on every model request");
+  const onboarding = "Shared-memory onboarding diagnostic: register the authorized fixture repository.\n"
+    + "shared-memory --root /fixture/memory register --project-id fixture --project-root /fixture/repo";
+  await writeFile(response, JSON.stringify({ status: "unmapped", text: "FOREIGN-MEMORY-MUST-NOT-APPEAR",
+    diagnostic: { code: "unmapped_scope", onboarding } }));
+  await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
+  const diagnosed = await session.extensionRunner.emitContext(messages);
+  assert.equal(diagnosed[0].customType, "shared-memory-onboarding", "onboarding diagnostics have their own message type");
+  assert.equal(diagnosed[0].content, onboarding);
+  assert.deepEqual(diagnosed.slice(1), [user]);
+  assert.ok(!JSON.stringify(convertToLlm(diagnosed)).includes("FOREIGN-MEMORY-MUST-NOT-APPEAR"));
+  const diagnosticCalls = (await readFile(calls, "utf8")).trim().split("\n").length;
+  assert.deepEqual(await session.extensionRunner.emitContext([...diagnosed, ...continuation]),
+    [...diagnosed, ...continuation], "ordinary growth retains a stable diagnostic prefix");
+  assert.equal((await readFile(calls, "utf8")).trim().split("\n").length, diagnosticCalls);
+  await writeFile(response, JSON.stringify({ status: "unmapped", text: "foreign",
+    diagnostic: { onboarding: "Shared-memory onboarding diagnostic:" + "x".repeat(6001) } }));
+  await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
+  assert.deepEqual(await session.extensionRunner.emitContext(diagnosed), [user], "oversized diagnostic is dropped");
+  await writeFile(response, JSON.stringify({ status: "ok", text: firstText }));
+  await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
+  const registered = await session.extensionRunner.emitContext(diagnosed);
+  assert.equal(registered[0].customType, "shared-memory-context", "successful refresh replaces onboarding with the established message type");
+  assert.equal(registered[0].content, firstText);
   assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"),
     "request context recall is never persisted in native session history");
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ status: "pass", installed_sdk: sdkRoot,
     boundary: "real extension loader + in-memory session + native event dispatch + convertToLlm",
     context_transport: "fixture executable", model_calls: 0,
-    checks: ["actual cwd", "session identity refresh", "startup/resume/compact", "ordinary-growth converted prefix", "leading system preserved", "user-level recall", "replacement", "fail closed", "bounded", "native history preserved"],
+    checks: ["actual cwd", "session identity refresh", "startup/resume/compact", "ordinary-growth converted prefix", "leading system preserved", "user-level recall", "replacement", "actionable separate onboarding diagnostic", "diagnostic prefix stability", "fail closed", "bounded", "native history preserved"],
     cache_claim: "CPU prefix correctness only; provider cache behavior unmeasured" }));
 } finally {
   session?.dispose();

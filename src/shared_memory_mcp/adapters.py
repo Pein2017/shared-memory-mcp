@@ -41,6 +41,11 @@ def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
     caller = _caller(harness, event)
     result = store.context(caller, limit=limit, max_chars=max_chars)
     if not isinstance(result, dict) or result.get("status") != "ok":
+        info = result.get("diagnostic") if isinstance(result, dict) else None
+        hint = info.get("onboarding") if isinstance(info, dict) else None
+        if (isinstance(hint, str) and hint.startswith('Shared-memory onboarding diagnostic:')
+                and len(hint) <= max_chars and '<shared-memory-context>' not in hint):
+            return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": hint}}
         status = result.get("status") if isinstance(result, dict) else None
         raise AdapterInputError("Core could not resolve context",
                                 status if status in ("unmapped", "ambiguous", "invalid") else "invalid_context_output")

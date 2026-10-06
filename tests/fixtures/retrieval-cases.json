@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "evidence_boundary": "Synthesized package task examples conditioned on inspected baseline 7963cca source. Isolated runtime fixtures are not production memory or a labeled production retrieval benchmark.",
+  "records": [
+    {
+      "key": "repo-scope",
+      "kind": "observation",
+      "title": "shared-memory-mcp repository scope",
+      "body": "Resolve the actual caller cwd and Git common identity; independent nested repositories need their own registered project.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/core.py",
+          "locator": "MemoryStore._resolve"
+        }
+      ]
+    },
+    {
+      "key": "split-entity",
+      "kind": "observation",
+      "title": "Shared memory MCP process scope",
+      "body": "Process working directory belongs to the server. It cannot replace caller cwd for project resolution.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/core.py",
+          "locator": "MemoryStore._resolve"
+        }
+      ]
+    },
+    {
+      "key": "navigation",
+      "kind": "observation",
+      "title": "Empty-query startup navigation",
+      "body": "Empty-query context loads routing and caller identity without reading historical record bodies.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/recall.py",
+          "locator": "context_view"
+        }
+      ]
+    },
+    {
+      "key": "task-context",
+      "kind": "observation",
+      "title": "Task-query startup context",
+      "body": "Explicit task-query context performs search and returns matching record cards within its budget.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/recall.py",
+          "locator": "context_view"
+        }
+      ]
+    },
+    {
+      "key": "corruption-negative",
+      "kind": "result",
+      "title": "Corrupt curation negative result",
+      "body": "A content binding mismatch is rejected. Refuse corrupted curation rather than classify a raw active record as eligible.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/curation.py",
+          "locator": "projected_records; journals"
+        }
+      ]
+    },
+    {
+      "key": "capture-positive",
+      "kind": "result",
+      "title": "Reviewed capture successful publication",
+      "body": "Valid source-reviewed capture creates an active record; success assumes valid canonical bytes and valid metadata.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/curation.py",
+          "locator": "capture"
+        }
+      ]
+    },
+    {
+      "key": "capture-recovery",
+      "kind": "observation",
+      "title": "Capture idempotency incomplete_capture recovery",
+      "body": "Replay an identical completed request. A changed payload conflicts. Unbound legacy candidate recovery fails with incomplete_capture.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/curation.py",
+          "locator": "capture"
+        }
+      ]
+    },
+    {
+      "key": "register",
+      "kind": "observation",
+      "title": "Register project repository",
+      "body": "Use explicit register for a verified repository. Search and context remain read-only.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/core.py",
+          "locator": "MemoryStore.register; MemoryStore._resolve"
+        }
+      ]
+    },
+    {
+      "key": "original-projection",
+      "kind": "observation",
+      "title": "Retirement lifecycle projection original",
+      "body": "Original projected_records preserves lifecycle_status and applies recall_retired: active becomes retired for default eligibility.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/curation.py",
+          "locator": "projected_records; journals"
+        }
+      ],
+      "details": {
+        "statement_type": "reference"
+      }
+    },
+    {
+      "key": "derivative-projection",
+      "kind": "observation",
+      "title": "Retirement lifecycle projection summary",
+      "body": "Example derivative summary repeats the projection rule. Open the original source before classifying active history as recallable.",
+      "sources": [
+        {
+          "path": "tests/fixtures/retrieval-sources.md",
+          "locator": "Derivative example",
+          "derivative": true
+        }
+      ],
+      "details": {
+        "statement_type": "interpretation",
+        "conditions": "Synthesized summary only; not independent corroboration."
+      }
+    },
+    {
+      "key": "retired-handoff",
+      "kind": "handoff",
+      "title": "Retirement lifecycle projection handoff",
+      "body": "Historical transport snapshot repeats projection words. Retired history is explicitly readable and excluded from default recall.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/recall.py",
+          "locator": "collect; source_hint; read"
+        }
+      ],
+      "retired": true
+    },
+    {
+      "key": "foreign-projection",
+      "kind": "observation",
+      "title": "Retirement lifecycle projection foreign",
+      "body": "Same subject in another project without an explicit sharing edge is invisible to this caller.",
+      "sources": [
+        {
+          "path": "src/shared_memory_mcp/recall.py",
+          "locator": "collect; source_hint; read"
+        }
+      ],
+      "project": "foreign"
+    }
+  ],
+  "routing": {
+    "version": 1,
+    "description": "Synthesized routing example grounded in explicit baseline registration. Not installed configuration.",
+    "topics": [
+      {
+        "id": "registration",
+        "title": "Register repository",
+        "when": "When the current repository needs explicit onboarding.",
+        "aliases": [
+          "记忆注册"
+        ],
+        "search_terms": [
+          "register"
+        ],
+        "sources": [
+          {
+            "path": "src/shared_memory_mcp/core.py",
+            "locator": "MemoryStore.register"
+          }
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "identifier-entity",
+      "failure_classes": [
+        "identifier-vs-split-entity"
+      ],
+      "task_question": "How does shared-memory-mcp choose the caller repository scope?",
+      "queries": {
+        "concise": "shared-memory-mcp"
+      },
+      "expected_useful": [
+        "repo-scope"
+      ],
+      "nearest_confusable": [
+        "split-entity"
+      ],
+      "applicability_rationale": "The target owns caller Git/project resolution. A server process cwd is a different entity and cannot determine caller scope.",
+      "relevant_negative_evidence": []
+    },
+    {
+      "id": "query-condition",
+      "failure_classes": [
+        "version-or-condition"
+      ],
+      "task_question": "Does empty-query startup load record bodies under baseline 7963cca?",
+      "queries": {
+        "concise": "startup context"
+      },
+      "expected_useful": [
+        "navigation"
+      ],
+      "nearest_confusable": [
+        "task-context"
+      ],
+      "applicability_rationale": "Empty query and explicit task query are distinct conditions of context_view in the same baseline; task-mode cards cannot answer navigation-mode behavior.",
+      "relevant_negative_evidence": []
+    },
+    {
+      "id": "negative-evidence",
+      "failure_classes": [
+        "relevant-negative-result"
+      ],
+      "task_question": "Can valid-looking canonical active status survive corrupted curation?",
+      "queries": {
+        "concise": "curation capture active"
+      },
+      "expected_useful": [
+        "corruption-negative"
+      ],
+      "nearest_confusable": [
+        "capture-positive"
+      ],
+      "applicability_rationale": "A successful valid capture assumes intact metadata. The rejection result determines the corrupt-input condition and must not be hidden to prefer success.",
+      "relevant_negative_evidence": [
+        "corruption-negative"
+      ]
+    },
+    {
+      "id": "query-length",
+      "failure_classes": [
+        "long-vs-concise"
+      ],
+      "task_question": "What request must be replayed after uncertain capture and which legacy recovery cannot proceed?",
+      "queries": {
+        "original": "I am investigating capture idempotency after a lost response and need to know which complete original request to replay, whether changing review is safe, and why an incomplete_capture legacy candidate is blocked.",
+        "concise": "capture idempotency incomplete_capture"
+      },
+      "expected_useful": [
+        "capture-recovery"
+      ],
+      "nearest_confusable": [
+        "capture-positive"
+      ],
+      "applicability_rationale": "Exact replay and legacy missing-binding conditions differ from an ordinary successful capture. Query verbosity is observed, not treated as relevance.",
+      "relevant_negative_evidence": []
+    },
+    {
+      "id": "cjk-alias",
+      "failure_classes": [
+        "cjk-curated-alias-and-unknown-paraphrase"
+      ],
+      "task_question": "How can a Chinese task phrase find the explicit registration owner?",
+      "queries": {
+        "curated_alias": "记忆注册",
+        "unknown_paraphrase": "把这间工坊挂进知识台账"
+      },
+      "expected_useful": [
+        "register"
+      ],
+      "nearest_confusable": [
+        "repo-scope"
+      ],
+      "applicability_rationale": "The documented fixture alias intentionally expands to register. The workshop-to-knowledge-ledger registration paraphrase has no supplied curated expansion and may honestly produce zero; semantic synonym support is not inferred.",
+      "relevant_negative_evidence": []
+    },
+    {
+      "id": "derivative-source",
+      "failure_classes": [
+        "derivative-vs-original"
+      ],
+      "task_question": "Which computation must be inspected to correct raw-status retirement classification?",
+      "queries": {
+        "concise": "retirement lifecycle projection"
+      },
+      "expected_useful": [
+        "original-projection"
+      ],
+      "nearest_confusable": [
+        "derivative-projection"
+      ],
+      "applicability_rationale": "The curation implementation defines the projection. A synthesized summary can navigate to it but supplies no independent evidence.",
+      "relevant_negative_evidence": []
+    },
+    {
+      "id": "visibility",
+      "failure_classes": [
+        "retired-handoff-and-foreign-scope"
+      ],
+      "task_question": "Can historical handoff or same-subject foreign project records appear in ordinary recall?",
+      "queries": {
+        "concise": "retirement lifecycle projection"
+      },
+      "expected_useful": [
+        "original-projection"
+      ],
+      "nearest_confusable": [
+        "retired-handoff",
+        "foreign-projection"
+      ],
+      "applicability_rationale": "Retired transport remains in explicit local history; unrelated project records require explicit sharing. Topic similarity does not grant visibility.",
+      "relevant_negative_evidence": []
+    }
+  ]
+}

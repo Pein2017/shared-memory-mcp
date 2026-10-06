@@ -244,7 +244,8 @@ def capture(store, context, record, idempotency_key, review=None, details=None):
         relative = Path('capture') / scope['project_id'] / (_digest(idempotency_key) + '.json')
         expected = {'version': 1, 'project_id': scope['project_id'], 'key': idempotency_key, 'digest': digest}
         existing = read_json(store, relative)
-        if safe_path(store, relative).exists():
+        has_receipt = safe_path(store, relative).exists()
+        if has_receipt:
             _keys(existing, set(expected), set(expected), 'capture receipt')
             if (type(existing['version']) is not int or existing['version'] != 1 or
                     existing['project_id'] != scope['project_id'] or existing['key'] != idempotency_key or
@@ -253,7 +254,30 @@ def capture(store, context, record, idempotency_key, review=None, details=None):
                 _fail('corrupt_capture', 'Cannot trust capture request binding')
             if existing['digest'] != digest:
                 _fail('idempotency_conflict', 'Capture key was used with a different payload')
-        else:
+        if record['kind'] == 'handoff':
+            # A receipt is intent, not completion. Legacy replay needs the full
+            # curation binding and, for a reviewed call, its exact publication.
+            records = store._effective(store._load(scope['project_id']))
+            prior = store._retry(records, 'proposal', 'capture:' + idempotency_key,
+                                 _digest({'context': context, 'record': record}))
+            metadata, operations = journals(store, scope['project_id'], records)
+            operation = operations.get('capture-curation:' + idempotency_key)
+            if operation and operation[1]['payload']['capture_digest'] != digest:
+                _fail('idempotency_conflict', 'Capture key was used with a different payload')
+            completed = bool(prior and operation and operation[0] == prior['id'] and
+                             operation[1]['payload']['capture_digest'] == digest)
+            if completed and review is not None:
+                publication = store._retry(records, 'promotion', 'capture-review:' + idempotency_key,
+                                           _digest({'context': context, 'id': prior['id'], 'old_ids': [], 'review': review}))
+                completed = bool(publication and publication['id'] == prior['id'])
+            if not completed:
+                store._admit(record)
+            overlay = metadata[prior['id']]
+            status = 'retired' if overlay['recall_retired'] and prior['effective_status'] == 'active' else prior['effective_status']
+            return {'status': 'ok', 'id': prior['id'], 'project_id': prior['project_id'],
+                    'effective_status': status, 'replayed': True,
+                    'curation_revision': overlay['curation_revision']}
+        if not has_receipt:
             # Completed pre-repair calls already have a full binding in curation.
             records = store._effective(store._load(scope['project_id']))
             prior = store._retry(records, 'proposal', 'capture:' + idempotency_key,

@@ -23,6 +23,8 @@ class Source(TypedDict):
 
 
 class Record(TypedDict):
+    """Durable record input. handoff is deprecated: completed exact legacy replay only; new writes are rejected."""
+    # Keep historical retry payloads transport-compatible; core owns admission.
     kind: Literal['observation','evidence','hypothesis','decision','experiment','result','invariant','bug/root-cause','handoff']
     title: str
     body: str
@@ -98,7 +100,7 @@ def make_server(store):
 
     @server.tool(title='Create a candidate',icons=icons,annotations=append)
     def create(context: CallContext, record: Record, idempotency_key: str) -> dict:
-        """Create durable source-linked candidates, excluded from default recall. Handoff transport alone is not durable knowledge; capture supports one-call reviewed publication."""
+        """Create durable source-linked candidates, excluded from default recall. New handoff memory is rejected; local handoff documents remain supported. capture supports one-call reviewed publication."""
         return store.propose(context,record,idempotency_key)
 
     @server.tool(title='Approve a candidate',icons=icons,annotations=append)
@@ -119,7 +121,7 @@ def make_server(store):
     @server.tool(title='Capture reviewed memory',icons=icons,annotations=append)
     def capture(context: CallContext, record: Record, idempotency_key: str,
                 review: Review | None = None, details: Details | None = None) -> dict:
-        """Capture once; source-checked review publishes, absent review keeps a candidate. Replay identical full payload/key after uncertainty. Publication is not proof or permission."""
+        """Capture once; source-checked review publishes, absent review keeps a candidate. New handoff memory is rejected; completed exact legacy replay remains available. Replay identical full payload/key after uncertainty. Publication is not proof or permission."""
         return store.capture(context,record,idempotency_key,review,details)
 
     @server.tool(title='Curate or retire recall',icons=icons,annotations=revise)
