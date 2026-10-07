@@ -189,7 +189,8 @@ def test_fresh_stdio_admits_completed_legacy_payload_but_rejects_new_writes(env,
     before = snapshot(store)
     async def verify():
         params = StdioServerParameters(command=sys.executable,
-            args=['-m', 'shared_memory_mcp.server', '--root', str(store.root)])
+            args=['-m', 'shared_memory_mcp.server', '--root', str(store.root)],
+            env={'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src'), 'PYTHONDONTWRITEBYTECODE': '1'})
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()

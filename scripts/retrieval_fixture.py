@@ -1,6 +1,7 @@
 """Isolated example corpus only. Never points at or seeds an existing store."""
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +12,18 @@ from shared_memory_mcp.core import MemoryStore, _digest, _json
 BASELINE = '7963ccaa59abf8a27a1f86f4e517da124019fd5b'
 PACKAGE = Path(__file__).resolve().parents[1]
 FIXTURE = PACKAGE / 'tests/fixtures/retrieval-cases.json'
+
+
+def ranking_source_signature(text):
+    """Freeze recall code except the explicitly separate visibility collector.
+
+    This preserves constants, tokenization, ranking, routing and pagination;
+    admissions are separately exercised against actual visible record sets.
+    It proves source equivalence, not a production retrieval-quality result.
+    """
+    tree = ast.parse(text)
+    tree.body = [node for node in tree.body if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != 'collect']
+    return hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
 
 
 def corpus():
@@ -120,10 +133,13 @@ def qualify(store, context, records, limit=2):
         results.append({**case, 'observations': observations})
     baseline = subprocess.run(['git', '-C', str(PACKAGE), 'show', BASELINE + ':src/shared_memory_mcp/recall.py'],
                               capture_output=True, text=True, check=True).stdout
-    unchanged = (PACKAGE / 'src/shared_memory_mcp/recall.py').read_text('utf-8') == baseline
+    current = (PACKAGE / 'src/shared_memory_mcp/recall.py').read_text('utf-8')
+    unchanged = current == baseline
+    ranking_unchanged = ranking_source_signature(current) == ranking_source_signature(baseline)
     return {'status': 'ok', 'evidence_boundary': corpus()['evidence_boundary'], 'baseline': BASELINE,
             'cases': results, 'recall_source_matches_baseline': unchanged,
-            'ranking_changed': False if unchanged else None,
+            'ranking_source_matches_baseline': ranking_unchanged,
+            'ranking_changed': False if ranking_unchanged else None,
             'limitations': [
                 'This explicitly synthesized bounded corpus checks plumbing and observes ranks; it does not establish production retrieval quality.',
                 'Useful targets and distractors are source/applicability judgments recorded before retrieval, not lexical truth labels.',

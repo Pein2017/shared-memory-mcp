@@ -95,9 +95,11 @@ def collect(store, context, include_inactive=False, include_shared=True):
     if not isinstance(include_inactive, bool) or not isinstance(include_shared, bool):
         _fail('invalid_input', 'Visibility flags must be boolean')
     scope = store._resolve(context)
+    from .dreaming import record_use_filter
+    usable = record_use_filter(store)
     own = [r for r in projected_records(store, scope['project_id']) if store._visible(r, scope)]
     records = [{**r, 'imported': False} for r in own
-               if include_inactive or r['effective_status'] == 'active']
+               if usable(r) and (include_inactive or r['effective_status'] == 'active')]
     filtered = len(own) - len(records)
     policy = load_sharing(store)
     if include_shared:
@@ -106,7 +108,7 @@ def collect(store, context, include_inactive=False, include_shared=True):
                 continue
             for r in projected_records(store, edge['from']):
                 d = r['details']
-                if (r['scope'] == 'project' and r['effective_status'] == 'active' and
+                if (usable(r) and r['scope'] == 'project' and r['effective_status'] == 'active' and
                         not r['recall_retired'] and d.get('domain') == 'engineering' and
                         scope['project_id'] in d.get('share_with', [])):
                     records.append({**r, 'imported': True})

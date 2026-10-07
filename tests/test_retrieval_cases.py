@@ -9,7 +9,7 @@ from shared_memory_mcp.core import MemoryError
 
 SCRIPTS = Path(__file__).resolve().parents[1] / 'scripts'
 sys.path.insert(0, str(SCRIPTS))
-from retrieval_fixture import BASELINE, PACKAGE, corpus, qualify, seed, source
+from retrieval_fixture import BASELINE, PACKAGE, corpus, qualify, seed, source, ranking_source_signature
 
 
 def test_cases_bind_sources_applicability_and_seven_failure_classes():
@@ -70,7 +70,11 @@ def test_alias_and_unknown_paraphrase_report_honest_miss(tmp_path):
 def test_rank_is_frozen_and_revision_fence_is_exercised(tmp_path):
     checked = subprocess.run(['git', '-C', str(PACKAGE), 'show', BASELINE + ':src/shared_memory_mcp/recall.py'],
                              capture_output=True, text=True, check=True)
-    assert (PACKAGE / 'src/shared_memory_mcp/recall.py').read_text() == checked.stdout
+    current = (PACKAGE / 'src/shared_memory_mcp/recall.py').read_text()
+    assert ranking_source_signature(current) == ranking_source_signature(checked.stdout)
+    # A real scoring change must still break this fence; no blanket baseline refresh.
+    assert "'title': 4.0" in current
+    assert ranking_source_signature(current.replace("'title': 4.0", "'title': 9.0", 1)) != ranking_source_signature(current)
     store, ctx, records = seed(tmp_path)
     first = store.search(ctx, 'retirement lifecycle projection', limit=1)
     original = records['original-projection']
@@ -88,4 +92,6 @@ def test_isolated_cli_reports_without_live_store(tmp_path):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert len(report['cases']) == 7 and report['ranking_changed'] is False
+    assert report['ranking_source_matches_baseline'] is True
+    assert report['recall_source_matches_baseline'] is False  # Dream source-use admission is intentionally new.
     assert list(tmp_path.iterdir()) == []

@@ -36,10 +36,15 @@ def _caller(harness: str, event: Any) -> dict[str, str]:
 
 
 def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
-                max_chars: int = 6000) -> dict[str, Any]:
+                max_chars: int = 6000, dream_profile: str | None = None,
+                dream_scenario: str = 'general') -> dict[str, Any]:
     """Translate only the actual native cwd/session; never use process cwd."""
     caller = _caller(harness, event)
     result = store.context(caller, limit=limit, max_chars=max_chars)
+    if dream_profile:
+        from .dream_transport import append_startup_collaboration
+        result = append_startup_collaboration(store, caller, result, dream_profile,
+                                               dream_scenario, max_chars=max_chars)
     if not isinstance(result, dict) or result.get("status") != "ok":
         info = result.get("diagnostic") if isinstance(result, dict) else None
         hint = info.get("onboarding") if isinstance(info, dict) else None
@@ -58,7 +63,8 @@ def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
 
 
 def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
-              stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+              stdout: TextIO | None = None, stderr: TextIO | None = None,
+              dream_profile: str | None = None, dream_scenario: str = 'general') -> int:
     """Emit host JSON; errors inject no memory and remain advisory to the host."""
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
@@ -71,7 +77,7 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
             event = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             raise AdapterInputError("Hook stdin must be a JSON event") from exc
-        output = handle_hook(store, harness, event)
+        output = handle_hook(store, harness, event, dream_profile=dream_profile, dream_scenario=dream_scenario)
     except Exception as exc:
         # Do not echo raw native input, transcript paths, credentials, or records.
         code = getattr(exc, "code", "adapter_error")

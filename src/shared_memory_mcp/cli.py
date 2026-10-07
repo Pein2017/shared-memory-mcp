@@ -45,6 +45,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog='shared-memory')
     parser.add_argument('--root')
     commands = parser.add_subparsers(dest='command',required=True)
+    from .dream_cli import add_parser as add_dream_parser
+    add_dream_parser(commands)
     commands.add_parser('init')
     registration = commands.add_parser('register')
     registration.add_argument('--project-id',required=True)
@@ -58,8 +60,12 @@ def main(argv=None):
     recall.add_argument('--query',default='')
     recall.add_argument('--limit',type=int,default=8)
     recall.add_argument('--max-chars',type=int,default=6000)
+    recall.add_argument('--dream-profile')
+    recall.add_argument('--dream-scenario', default='general')
     hook = commands.add_parser('hook')
     hook.add_argument('--harness',required=True,choices=['claude','codex'])
+    hook.add_argument('--dream-profile')
+    hook.add_argument('--dream-scenario', default='general')
     call = commands.add_parser('call')
     call.add_argument('--tool', required=True, choices=['context','search','read','create','approve','update','delete','capture','curate'])
     server = commands.add_parser('serve')
@@ -77,6 +83,10 @@ def main(argv=None):
         elif args.command == 'context':
             context = {key:getattr(args,key) for key in ('cwd','harness','session_id','actor','task_id','project_id') if getattr(args,key) is not None}
             result = store.context(context,args.query,args.limit,args.max_chars)
+            if args.dream_profile:
+                from .dream_transport import append_startup_collaboration
+                result = append_startup_collaboration(store, context, result, args.dream_profile,
+                                                       args.dream_scenario, max_chars=args.max_chars)
         elif args.command == 'call':
             raw = sys.stdin.read(1048577)
             if len(raw) > 1048576:
@@ -86,9 +96,14 @@ def main(argv=None):
             except (ValueError, MemoryError) as exc:
                 raise MemoryError('invalid_input', 'Operation arguments must be valid JSON') from exc
             result = call_operation(store, args.tool, arguments)
+        elif args.command == 'dream':
+            from .dream_cli import handle as handle_dream
+            result = handle_dream(store, args)
+            if result is None:
+                return 0
         elif args.command == 'hook':
             from .adapters import hook_main
-            return hook_main(store,args.harness)
+            return hook_main(store,args.harness, dream_profile=args.dream_profile, dream_scenario=args.dream_scenario)
         else:
             from .server import serve
             serve(store)
@@ -97,6 +112,8 @@ def main(argv=None):
         if (args.command in ('context','project') or args.command == 'call' and args.tool == 'context') and result.get('status') != 'ok':
             print('shared-memory: '+result['diagnostic']['code'],file=sys.stderr)
             return 2
+        if args.command == 'dream' and result.get('status') in {'partial', 'blocked'}:
+            return 3
         return 0
     except MemoryError as exc:
         diagnostic = getattr(exc, 'diagnostic', {'code':exc.code,'message':str(exc)})

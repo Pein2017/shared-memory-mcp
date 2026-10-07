@@ -41,7 +41,7 @@ function runContext(command: string, args: string[]): Promise<{ text: string; on
   });
 }
 
-export interface SharedMemoryOptions { root?: string; cli?: string }
+export interface SharedMemoryOptions { root?: string; cli?: string; dreamProfile?: string; dreamScenario?: string }
 
 /** A persistent wrapper can supply paths without depending on Pi's parent env. */
 export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
@@ -68,6 +68,8 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
       const recalled = await runContext(options.cli ?? process.env.SHARED_MEMORY_CLI ?? "shared-memory", [
         "--root", root, "context", "--cwd", ctx.cwd, "--harness", "pi",
         "--session-id", sessionId, "--actor", "pi", "--max-chars", String(maxChars),
+        ...(options.dreamProfile ? ["--dream-profile", options.dreamProfile,
+          "--dream-scenario", options.dreamScenario ?? "general"] : []),
       ]);
       if (current === generation) { text = recalled.text; onboarding = recalled.onboarding; timestamp = Date.now(); identity = key(ctx); }
     } catch (error) {

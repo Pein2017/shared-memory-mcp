@@ -31,7 +31,9 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   delete process.env.SHARED_MEMORY_CLI;
   delete process.env.SHARED_MEMORY_ROOT;
   await writeFile(wrapper, `import {createSharedMemoryExtension} from ${JSON.stringify(extension)};\n`
-    + `export default createSharedMemoryExtension(${JSON.stringify({ root: scratch, cli: fixtureCli })});\n`);
+    + `export default createSharedMemoryExtension(${JSON.stringify({ root: scratch, cli: fixtureCli,
+      ...(process.env.SHARED_MEMORY_TEST_DREAM_PROFILE ? { dreamProfile: process.env.SHARED_MEMORY_TEST_DREAM_PROFILE,
+        dreamScenario: "research" } : {}) })});\n`);
   await writeFile(response, JSON.stringify({ status: "ok", text: firstText }));
   const settingsManager = SettingsManager.inMemory({ packages: [], extensions: [] });
   const loader = new DefaultResourceLoader({ cwd: project, agentDir, settingsManager,
@@ -98,6 +100,12 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
     assert.equal(args[args.indexOf("--cwd") + 1], project);
     assert.equal(args[args.indexOf("--session-id") + 1], manager.getSessionId());
     assert.equal(args[args.indexOf("--harness") + 1], "pi");
+    if (process.env.SHARED_MEMORY_TEST_DREAM_PROFILE) {
+      assert.equal(args[args.indexOf("--dream-profile") + 1], process.env.SHARED_MEMORY_TEST_DREAM_PROFILE);
+      assert.equal(args[args.indexOf("--dream-scenario") + 1], "research");
+    } else {
+      assert.ok(!args.includes("--dream-profile"), "ordinary navigation does not opt into Dreaming");
+    }
   }
   const previousSessionId = manager.getSessionId();
   manager.newSession();
@@ -151,6 +159,7 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   console.log(JSON.stringify({ status: "pass", installed_sdk: sdkRoot,
     boundary: "real extension loader + in-memory session + native event dispatch + convertToLlm",
     context_transport: "fixture executable", model_calls: 0,
+    dreaming_options: process.env.SHARED_MEMORY_TEST_DREAM_PROFILE ? "explicit profile/scenario forwarded" : "absent by default",
     checks: ["actual cwd", "session identity refresh", "startup/resume/compact", "ordinary-growth converted prefix", "leading system preserved", "user-level recall", "replacement", "actionable separate onboarding diagnostic", "diagnostic prefix stability", "fail closed", "bounded", "native history preserved"],
     cache_claim: "CPU prefix correctness only; provider cache behavior unmeasured" }));
 } finally {

@@ -14,6 +14,13 @@ context: |
   filesystem. Markdown records are canonical; SQLite coordinates writes and
   idempotency but stores no canonical knowledge. No daemon, embeddings, automatic
   transcript extraction, background model calls, or mandatory search index.
+  The 2026-10-07 Dreaming change adds explicit manual bounded public-history
+  reads, frozen drafts and a profile-bound publisher. Any authorized Agent may
+  discover sources, audit retained memory and select local/global consolidation
+  batches. Model/harness choice does not determine grants. Ordinary CRUD remains
+  cwd-scoped. Dream executor identity and authorized targets stay separate.
+  This implementation authorization covers disposable CPU/transport validation,
+  not deployment, live-memory pilot, provider calls or native tool-pool isolation.
   All scoped calls require the actual session cwd; unknown/ambiguous bindings
   fail closed. Agents propose candidates and explicitly validate/promote them.
   Supersession preserves evidence and never upgrades hypotheses into facts.
