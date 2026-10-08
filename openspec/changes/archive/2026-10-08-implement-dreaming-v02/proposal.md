@@ -23,3 +23,17 @@ Following source acceptance, the user separately authorized Pi/Codex installatio
 ## Non-goals
 
 No scheduler, daemon, model SDK, generic sandbox, leases, new vector store, full transcript mirror, automated research execution, instruction rewriting or whole-store rollback.
+
+## Authorized production activation follow-up (2026-10-08)
+
+The user now explicitly requests the remaining production setup and WebCodex integration before a remote retry. This authorizes a bounded production policy, installation of the narrowly required per-call-caller endpoint, WebCodex provider registration/hot reload, and a small source-linked production pilot. It does not authorize paid model calls, historical backfill, automatic scheduling, unrelated research changes, or Git publication of this follow-up. Source scope is initially the shared-memory-mcp documentation and its retained records unless the user selects broader sources.
+
+Add a general `dream gateway` endpoint for persistent MCP bridges. The launcher fixes the profile and publication capability; every tool takes the same required `context` contract as ordinary MCP, resolving the current registered executor and preserving per-Run attempt fences. It records caller-declared, native-session-unverified identity assurance. Existing caller-bound general/fixed endpoints and ordinary nine-tool contracts remain unchanged.
+
+## Authorized material-reading follow-up (2026-10-08)
+
+The user requests repeated bounded reading of long frozen material. Extend the existing material-read CLI and general/gateway/fixed MCP calls with event selection and continuation. Reconstruct the admitted event from unchanged original bytes without persisting another transcript. Page delivery does not certify semantic review or revise frozen coverage. This follow-up authorizes source implementation and disposable qualification; it does not authorize historical publication, policy changes, service restart or a new consolidation run. Pi ancestry repair, producer-version admission, scoped view invalidation and index-anchored overview remain separate design proposals from the same audit discussion.
+
+## Authorized consolidation corrections (2026-10-08)
+
+The user subsequently requests autonomous implementation of the remaining audit proposals. Scope now includes Pi structural ancestry and publication safety, supported producer-format admission, dependency-scoped view invalidation, and a reviewed index-anchored production research Overview with actual consumer qualification. The existing source grants suffice; no new source authority or scientific decision is added. Preserve existing dirty work and immutable receipts. This authorization does not include experiments, provider/model calls, service restart, commits or push.

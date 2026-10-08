@@ -1,4 +1,10 @@
-## ADDED Requirements
+# shared-memory-dreaming Specification
+
+## Purpose
+
+Support manually selected, source-linked consolidation with bounded public-history access, explicit authority and recoverable canonical publication.
+
+## Requirements
 
 ### Requirement: Bounded trusted run
 The system SHALL bind each Run to a trusted profile, an Agent-selected authorized target and source subset, real executor, explicit source/provider budgets and one current Attempt. Model input MUST NOT expand authority. Harness and model labels MUST NOT confer privileges or determine who can perform Dreaming.
@@ -81,6 +87,18 @@ The publisher SHALL persist immutable semantic operations and intent before cano
 ### Requirement: Source honesty and bounded coverage
 Source readers SHALL use pure read-only bounded parsing, distinguish human attribution from role, retain lineage and return explicit gaps rather than fabricated completeness.
 
+Codex public projection admission SHALL validate supported wire structure independently of producer release labels and retain the observed producer version. Unknown structures remain explicit gaps. Pi selected evidence SHALL bind complete, unambiguous ancestry through recognized private structural bridge nodes without publishing their payloads. Missing, conflicting or cyclic ancestry, including legacy unproven frozen events, MUST NOT support publication or usable views.
+
+#### Scenario: Pi private bridge or missing ancestor
+- **WHEN** a selected public Pi leaf descends through a recognized tool or metadata node to a proven root
+- **THEN** the reader may return verified public ancestors without private payloads.
+- **WHEN** any ancestor is absent, ambiguous, cyclic or structurally unsupported
+- **THEN** a branch gap is retained and no selected suffix becomes publication evidence.
+
+#### Scenario: Producer release update
+- **WHEN** a Codex file records a different release but uses the supported public wire projection
+- **THEN** its validated messages remain readable with observed release provenance; unknown event structures remain gaps and Claude's selected version contract is unchanged.
+
 #### Scenario: Delegated user-role or unknown schema
 - **WHEN** a public message is delegated, quoted, unverified or structurally unsupported
 - **THEN** it cannot become an explicit Pein preference, and unsupported input remains a gap.
@@ -113,6 +131,22 @@ Records and both views SHALL share claim/source admission. Inferred collaboratio
 ### Requirement: Independently invalidated views
 Views SHALL publish immutable revisions through fenced current pointers, enforce current source restrictions for both default and historical reads, and trim only whole claims.
 
+New revisions SHALL retain global policy audit provenance while binding read usability to relevant authorization dependencies. Current caller, target, scenario, cited grants and attestations, dispositions, canonical lifecycle and collaboration permissions SHALL be enforced before and after source I/O. Legacy revisions retain their original fail-closed policy contract.
+
+#### Scenario: Unrelated policy edit versus relevant revocation
+- **WHEN** an unrelated profile is added or only current resource budgets change
+- **THEN** a new view remains readable under current caps.
+- **WHEN** relevant access is revoked, including during dependency verification
+- **THEN** current and historical reads return no claim text.
+
+#### Scenario: No applicable claims
+- **WHEN** an authorized scenario has no applicable view claims
+- **THEN** the read returns navigation with available authorized scenarios rather than a valid empty digest.
+
+#### Scenario: Current research selection anchor
+- **WHEN** the production current research Overview is refreshed
+- **THEN** it binds canonical research/index.md plus selected original result owners, preserves their current closure and stop state, and declares omitted branches and partial scope; changed index bytes make the snapshot stale.
+
 #### Scenario: Research drift versus privacy withdrawal
 - **WHEN** an owner changes normally
 - **THEN** the research view returns stale navigation without invalidating collaboration.
@@ -136,3 +170,33 @@ The system SHALL preserve exact source cursors and processing states across boun
 #### Scenario: Source cannot be reverified
 - **WHEN** current source or consumed-prefix verification cannot fit the selected budget
 - **THEN** the system returns a gap or blocked partial outcome, not an unchecked no-change or fabricated complete history.
+
+### Requirement: Caller-per-call persistent bridge
+The system SHALL provide a separately launcher-configured general gateway whose tools require the current caller context, while fixing the profile and publisher capability outside tool arguments. It SHALL reuse registered executor authorization, explicit takeover and attempt-generation checks. Caller-declared metadata MUST NOT be represented as authenticated or operator-verified native identity. Existing bound endpoint caller/authority contracts and ordinary endpoint schemas SHALL remain unchanged.
+
+#### Scenario: Two Workflow Sessions share one provider
+- **WHEN** two permitted executors call the persistent gateway with different actual caller contexts
+- **THEN** each effect retains its own caller provenance, calls cannot accidentally inherit the previous caller, and mutation of another current Attempt requires the existing explicit takeover protocol.
+
+#### Scenario: Caller tries to enlarge endpoint grants
+- **WHEN** caller context or top-level arguments contain a profile, publication switch, unregistered executor or ungranted target
+- **THEN** the request is rejected without canonical effects.
+
+#### Scenario: Production activation qualification
+- **WHEN** the configured WebCodex provider exposes the general gateway after a fenced reload
+- **THEN** an actual bounded production slice records discovery, source and memory inspection, reviewed publication, ordinary-memory consumption and Run closure, while preserving ordinary memory registration and reporting caller identity limits.
+
+### Requirement: Repeated bounded frozen-event reading
+The existing material-read CLI and general, gateway and fixed-Run MCP calls SHALL permit bounded continuation of one admitted frozen event's complete public text. Continuation SHALL retain original event identity, source version and interpretation, revalidate source bytes and current access, and report character intervals, total length and bounded reconstruction I/O. Reads MUST NOT mark material reviewed, change frozen coverage or expand source/publication authority.
+
+#### Scenario: Long owner or historical message
+- **WHEN** an admitted event exceeds its retained working excerpt and the caller requests successive bounded parts
+- **THEN** their exact concatenation recovers the full frozen public text, including Unicode and trailing caveats, while Run bytes, processing states and coverage remain unchanged.
+
+#### Scenario: Source, interpretation or access changes
+- **WHEN** a source is replaced or changed, its public interpretation differs, its grant or applicable disposition is revoked, or a cursor selects another Run/source/event
+- **THEN** continuation is rejected without returning substituted text or publishing an effect.
+
+#### Scenario: History gains an unselected suffix
+- **WHEN** an exact-prefix history source is appended after collection
+- **THEN** continuation may still read its unchanged admitted event at the original cutoff, without reading the new suffix as frozen evidence; epoch-bound catalog pages remain stale.

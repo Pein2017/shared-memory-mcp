@@ -2,53 +2,29 @@ schema: spec-driven
 
 context: |
   Language: en
-  All artifacts must be written in en.
-  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
-  This portable Python >=3.11 package provides a shared Markdown memory core,
-  stdio MCP through the official Python SDK, and qualified Codex/Pi adapters.
-  The 2026-10-04 user request reopens native Claude qualification with Haiku;
-  qualify its existing recall adapter before narrow actual activation.
-  Source belongs in this package; local runtime data is configured separately,
-  initially /data/CoordExp/.shared-memory/. Native harness memories are separate.
-  Supported persistence is cooperating processes on one Linux host and local
-  filesystem. Markdown records are canonical; SQLite coordinates writes and
-  idempotency but stores no canonical knowledge. No daemon, embeddings, automatic
-  transcript extraction, background model calls, or mandatory search index.
-  The 2026-10-07 Dreaming change adds explicit manual bounded public-history
-  reads, frozen drafts and a profile-bound publisher. Any authorized Agent may
-  discover sources, audit retained memory and select local/global consolidation
-  batches. Model/harness choice does not determine grants. Ordinary CRUD remains
-  cwd-scoped. Dream executor identity and authorized targets stay separate.
-  This implementation authorization covers disposable CPU/transport validation,
-  not deployment, live-memory pilot, provider calls or native tool-pool isolation.
-  All scoped calls require the actual session cwd; unknown/ambiguous bindings
-  fail closed. Agents propose candidates and explicitly validate/promote them.
-  Supersession preserves evidence and never upgrades hypotheses into facts.
-  Validate isolated real Codex/Pi sessions with the user-selected GPT-6-Luna
-  before enabling their actual configurations. Claude validation uses the
-  user-selected Haiku model, without unsupported effort flags or model fallback.
-  Preserve native stores and unrelated settings in any Claude activation.
-  Install one shared skill entry under .codex/skills;
-  the harnesses already share that directory through existing symlinks.
-
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
-
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  All artifacts use English structural headings and SHALL/MUST requirements.
+  This Python >=3.11 package owns an Agent-oriented, harness-neutral shared
+  Markdown memory core, stdio MCP, CLI and thin native adapters. Runtime data
+  is configured separately, initially /data/CoordExp/.shared-memory/.
+  Markdown is canonical; SQLite coordinates cooperating writers and idempotency
+  on one Linux host/local filesystem. Native harness memories remain independent.
+  Actual caller cwd/harness/session determines scope; unknown or ambiguous
+  bindings fail closed. Retain provenance, review, exact-scope correction,
+  logical withdrawal, current access checks and interrupted-write recovery.
+  Memory publication is neither scientific proof nor execution authority.
+  No daemon, automatic transcript extraction, scheduler, background model calls,
+  mandatory embeddings or new memory Git repository is required.
+  openspec/specs is the reconciled implemented baseline. The sole next-version
+  change is evolve-task-aware-shared-memory; its proposal, design, deltas and
+  tasks own the agreed target. Archived dated profiles and model-specific
+  qualification commands are historical evidence, not new execution grants.
+  The target provides one MCP entrypoint for ordinary Agent maintenance and
+  manually requested Dreaming, bounded content-bearing context, foreground
+  research/general mode selection and source-linked as-of project understanding.
+  Normal source updates preserve useful prior understanding; current judgments
+  require relevant current-owner checks by the foreground Agent. Access
+  revocation and explicit withdrawal still deny affected content.
+  Keep one bundled shared-memory skill through the existing shared skill entry.
+  This reconciliation is documentation and archival only. Implementation belongs
+  to the user's receiving session. Live installation, production memory writes,
+  historical bootstrap and paid model calls require their applicable task scope.

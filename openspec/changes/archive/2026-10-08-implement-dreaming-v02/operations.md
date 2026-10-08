@@ -1,6 +1,6 @@
 # Harness-neutral Dreaming operations and qualification boundaries
 
-This is source implementation, not a deployment. The ordinary nine-tool MCP server is unchanged. No existing installation, shared native harness configuration, live memory records or research owner files are changed by these instructions being present.
+This page describes source contracts and the separately authorized bounded production gateway below. The ordinary nine-tool MCP server is unchanged. Historical harness qualification remains limited to the evidence stated in its matrix; production activation does not imply native model or whole-history qualification.
 
 ## Reproduce the disposable delivery example
 
@@ -43,7 +43,7 @@ A policy has version 2, subject `Pein`, a central `collaboration_projects` list 
 
 This is a profile fragment, not an installed policy. Replace placeholders only from current authorization. Zero model budgets are appropriate for fixtures; a real externally launched Dreamer needs independently authorized provider/token/cost limits and launcher enforcement. The core never invokes a model and cannot enforce usage by another process. `model_calls` in a Run counts core calls, not external harness usage. Policy configuration is explicit: pass `--expected-revision absent` initially, or the exact prior revision when replacing it. Profile/source/caller strings and review prose are not authentication credentials.
 
-Use `kind=directory` to grant discovery beneath one explicit root, with the public format/schema and native version selected by the operator. A selector refers to a grant and relative path, optionally a branch or returned page selection. Grants do not confer permission to escape through symlinks or traversal. The unreleased version-1 Dreaming policy is replaced explicitly; ordinary version-1 memory records and sealed historical qualification receipts remain intact.
+Use `kind=directory` to grant discovery beneath one explicit root, with the public format/schema selected by the operator. Codex `native_version` is an optional producer hint; Claude requires its exact supported producer version. A selector refers to a grant and relative path, optionally a branch or returned page selection. Grants do not confer permission to escape through symlinks or traversal. The unreleased version-1 Dreaming policy is replaced explicitly; ordinary version-1 memory records and sealed historical qualification receipts remain intact.
 
 ## Manual start, inspect, review and publication
 
@@ -83,6 +83,28 @@ Every `record_approve` operation must include `record_id` and the exact `expecte
 `event-statuses.json` maps frozen event keys to `processed`, `excluded`, `no-signal` or `pending-review`. Missing processing states remain incomplete coverage. A successful process exit is not complete history or scientific validation. CLI publication returns exit 3 for `partial`/`blocked`, exit 2 for rejected input/operation errors and exit 0 for successful observations/effects. Always inspect the structured result.
 
 ## Continuation and conflicts
+
+### Read all parts of a long frozen event
+
+The ordinary `materials` response remains a bounded working excerpt. Select one returned event key to read its full frozen public text:
+
+```sh
+sm --root "$MEMORY_ROOT" dream materials "${BIND[@]}" --run-id "$RUN_ID" \
+  --source-id "$SOURCE_ID" --event-key "$EVENT_KEY" --max-chars 4096
+# Repeat with page.next_cursor unchanged until it is null.
+sm --root "$MEMORY_ROOT" dream materials "${BIND[@]}" --run-id "$RUN_ID" \
+  --source-id "$SOURCE_ID" --event-key "$EVENT_KEY" --max-chars 4096 --cursor "$MATERIAL_CURSOR"
+```
+
+General/gateway MCP `run_materials` and fixed-Run `source_read` accept the same `event_key`, `cursor` and `max_chars` fields. General calls retain `run_id`; gateway calls additionally retain the actual `context`; fixed-Run calls retain their launcher binding. No tool names or ordinary-memory schemas change. New MCP connections discover these optional parameters; an already running Python server must reconnect to load changed source.
+
+Each response returns one slice under the selected source's `events` and a `page` with character `offset`, `end`, `total_chars`, `text_sha256`, `next_cursor`, `read_bytes` and `verification_bytes`. The character limit is 1–16,000, default 4096 (at most 64,000 UTF-8 text bytes). The cursor is a transport string, not an input JSON object; do not decode it. Retrying an unchanged cursor and page size returns the same part. The original event key and evidence metadata remain intact, including the historical `excerpt_truncated` flag.
+
+The implementation reconstructs and verifies the admitted source page/prefix for each part. Direct-prefix reads cost three source-window passes; catalog-page reads cost four. Byte costs are explicit, and existing source-window bounds still apply. This supports the audited approximately 10 KiB owners without a transcript cache. It does not promise constant I/O for arbitrary large documents or unlimited native history.
+
+Completing delivery does not set `processed`, certify semantic review, repair ancestry or clear Run/source coverage gaps. Review full text and original owners before drafting claims. Source/grant/disposition changes are checked before return; a changed parser interpretation also rejects continuation. Existing sealed partial Runs, canonical records and views are not rewritten by reading them.
+
+### Resume a Run
 
 First inspect the exact Run. A nonclosed active Run makes `start` for the same target/source selection return `resume-required`, never a second worker. Other authorized target/source selections have separate lanes. To continue from another **actual** caller, bind that caller in `BIND`, then explicitly run:
 
@@ -132,9 +154,11 @@ Revocation applies on the next actual read or supported lifecycle refresh, not b
 
 ## Source windows and identity
 
-Codex requires `codex-rollout-v1` plus an explicit native version; Pi requires `pi-session-v3` and an explicit selected leaf for usable branch evidence; Claude requires `claude-jsonl-v1`, an explicit native version and a selected leaf for usable branch evidence. These are the implemented public projections, not a promise to parse every historical version. Unknown schemas, corrupt/oversized/incomplete events and missing branch ancestry are gaps. No native session loader is called. System/developer, thinking and full tool payloads are excluded; a small secret-pattern filter is not a general DLP guarantee. Source grants and the model/provider data boundary still need operator review.
+Codex requires `codex-rollout-v1` and a valid observed header `cli_version`; a configured `native_version` is an optional hint, not a release pin. Supported public wire structure determines admission, and the actual producer release is retained on events and source versions. Frequent CLI package updates therefore do not require changing a global historical release pin. Unknown event/payload structures remain gaps; unchanged wire shape cannot certify unchanged producer semantics. Pi requires `pi-session-v3` and an explicit selected leaf for usable branch evidence; Claude retains `claude-jsonl-v1`, an exact native version and a selected leaf. These projections do not promise every historical schema. No native session loader is called. System/developer, thinking and full tool payloads are excluded; a small secret-pattern filter is not a general DLP guarantee.
 
 Codex pins the first header's file owner. A subsequent embedded header produces `inherited_session_metadata` and conservatively marks following input as delegated/unknown; the parser does not guess where inherited history ends. Claude requires the full selected ancestor chain in the current public event window; missing, cyclic or conflicting ancestry yields a gap with no selected events. Without a Claude leaf, public navigation is available but publication rejects it as `unverified_branch`.
+
+Pi verifies the selected leaf-to-root chain through recognized raw structural identities, including tool/system/custom/metadata bridge nodes without their payload text. Missing, cyclic, conflicting or unknown ancestry yields a gap and no admitted suffix. Verified events carry `ancestry_verified=true`; publication rejects old cached Run events without it, and old Pi views without a bound proof are unverifiable. Catalog reconstruction rechecks original bytes rather than assigning a branch label from `leaf_id`. Proof covers the frozen window, not uniqueness in an unread suffix. Structural state is bounded to 1,024 identities; exhaustion is an explicit `source_limit`.
 
 The original exact-file prefix reader caps one consumed window at 8 MiB and 1,024 identities, with 64 KiB line allocation. General catalog paging separately traverses longer histories with bounded pages and server-validated continuation; it does not assert that an entire conversation fits one Run. A paging pass fixes the source file epoch; edits/appends invalidate that pass instead of mixing states. Selected page snapshots are revalidated before publication. Missing branch ancestry remains a gap, and native files are never rewritten into exports automatically.
 
@@ -146,7 +170,7 @@ A Run caps public working events at 128, selected sources at 16, drafts at 8, op
 
 URI-level no-use also applies to untagged existing records under default and historical reads. Equivalent local `file:///`, `file://localhost/` and percent-encoded paths match on both sides of the disposition comparison; remote file hosts remain distinct. Canonical records and the original disposition journal are preserved byte-for-byte.
 
-## Harness capability matrix for this implementation
+## Historical harness capability matrix for the original implementation
 
 | Dimension | Codex | Pi | Claude |
 |---|---|---|---|
@@ -160,3 +184,45 @@ URI-level no-use also applies to untagged existing records under default and his
 | Paid smoke / real memory pilot / semantic comparison | Not run | Not run | Not run |
 
 A different caller label in a real stdio subprocess tests the bound transport contract, not a real Codex/Pi/Claude model session. Source existence and machine admission checks do not prove semantic entailment. The source implementation and measured fixture paths are deliverable; production acceptance remains separately gated by the attached proposal.
+
+## Persistent caller-per-call MCP gateway
+
+For a persistent bridge shared by multiple actual work sessions, use:
+
+```sh
+shared-memory --root "$MEMORY_ROOT" dream gateway --profile bounded-pilot --enable-publisher
+```
+
+The launcher fixes the profile and publisher capability. All fourteen general tools (plus `draft_publish` when enabled) require `context` with the same fields as ordinary MCP: actual `cwd`, `harness`, `session_id`, `actor`, and optional verified `project_id`/`task_id`. A WebCodex caller uses its own actual `wc_sess_*` Workflow Session and `harness=webcodex`; the MCP provider process cwd is not the executor cwd. Every call gets a fresh engine, so another call's context cannot become its provenance. Profile and publisher switches are not accepted in tool arguments or nested context.
+
+This identity is caller-declared, native-session-unverified. It does not authenticate a person or prevent deliberate metadata impersonation. Current profile authorization, explicit takeover and generation fences still apply; ownership-restricted operations fail for a different declared caller. Existing bound general/fixed endpoints retain operator-bound identity assurance and unchanged schemas.
+
+The 2026-10-08 production profile `bounded-pilot` permits documentation source grants `readme` and `dreaming-docs`, target projects `shared-memory-mcp` and `coordexp`, and executor projects `coordexp`, `shared-memory-mcp`, `web-codex`. It admits record creation/approval and view publication only; inferred collaboration, destructive consolidation, native history and automatic model execution are outside this pilot. Select `target_project` explicitly because this profile has two targets. Existing CoordExp records can be audited, but an audit card alone is not source admission. All original sources must still be independently granted and verified for approval.
+
+WebCodex registers a second provider `shared-memory-dreaming` alongside ordinary `shared-memory`. Remote retry begins with `mcp_tool(action=list)`, then `describe` and `call` for `dream_catalog` on that provider, including the current caller context. Discover `source_read`/`memory_audit` schemas before calling them, select returned material, and follow the existing Run/draft/publication/closure lifecycle. A completed local pilot does not authorize repeated duplicate publication.
+
+## View refresh and current research selection
+
+New revisions retain `policy_revision` for audit and use `read_policy_revision` for relevant read permissions: target/scenarios, cited grants and attestations, applicable collaboration permissions, and the subject/schema contract. Adding an unrelated profile or changing resource budgets does not invalidate them; current budgets still apply. Caller, target, scenario, source grants and dispositions are rechecked after source I/O. Canonical lifecycle checks and global Run/publication fences remain intact. Cited directory grants and target/view dispositions retain conservative invalidation scope. Legacy immutable revisions keep their original global-policy check and require explicit reviewed republication when invalidated.
+
+If no claim matches a selected scenario, the view returns `navigation` with `available_scenarios`. It does not silently change claim applicability. For a current CoordExp research Overview, select `probes-research:index.md`, then original result owners for the included substantive claims. The index supplies selection/closure/stop state; it is not independent experimental corroboration. A changed index makes the view stale. Declare omitted branches, retain partial coverage and return to question/result owners before consequential use.
+
+The 2026-10-08 correction published six reviewed claims from nine selected owners, including canonical index.md, under the unchanged `coordexp-consolidate-20261008` profile. All four scenarios return nonempty valid context with no trimmed claims. The new Run is closed; CoordExp remains at 163 canonical records. Full text was delivered in 25 material parts, while frozen coverage remains partial. Fresh installed CLI/stdio processes consume editable source; existing connected MCP processes were not reconnected by this correction.
+
+## Installed native Codex/Pi Dreaming entrypoint
+
+The subsequently authorized reinstall adds `shared-memory-dreaming` alongside ordinary `shared-memory` in `/data/CoordExp/.codex/config.toml` and `/data/CoordExp/.pi/mcp.json`. Both launch the installed CLI with:
+
+```sh
+/data/CoordExp/.shared-memory/.venv/bin/shared-memory \
+  --root /data/CoordExp/.shared-memory dream gateway \
+  --profile coordexp-consolidate-20261008 --enable-publisher
+```
+
+Codex registration uses its native `codex mcp add`; the Pi entry has `exposure=direct`. The gateway fixes profile/publication capability at launch and requires actual caller context per tool call. Existing actions are record creation/approval and view publication; deployment does not expand source/target permissions or authorize scientific execution. No automatic Run or startup research digest is enabled. Installed Codex 0.159.2 and Pi 1.1.0 consumers qualified 9 ordinary plus 15 Dreaming tools. Reconnect/reload already-open clients to refresh their MCP/config snapshots; no existing user session or Web service was stopped by the installation.
+
+## Current WebCodex provider (2026-10-08)
+
+The subsequent authorized WebCodex refresh changes only the existing `shared-memory-dreaming` provider's launch profile in `deployment/config/runner.toml`, from the historical `bounded-pilot` above to `coordexp-consolidate-20261008`. It uses the same command as installed Codex/Pi. The latter profile currently grants 16 source roots/files, four target projects, and the same three publication actions. The old pilot remains a retained policy profile; this refresh does not delete it or expand its grants.
+
+Runner `runner_config_check` and generation-fenced `runner_config_reload` activated configuration generation 5 without a Server/Runner restart. The changed provider receives a fresh connection; the unchanged ordinary provider retains its process identity. Actual WebCodex gateway calls qualified current `run_materials` continuation, authorized Overview reading and target denial. Both endpoints belong to this package and share one store; separate MCP connections fix Dreaming profile/publisher capability at launch, rather than creating another memory system. Receipt owner: `outputs/dreaming-webcodex-refresh-20261008/`.
