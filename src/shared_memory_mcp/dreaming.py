@@ -18,7 +18,7 @@ from .curation import projected_records, read_json, safe_path
 from .dream_records import (ACTIONS, bounded_strings, collaboration, collaboration_effect,
                             core_effect, namespace, parse_markdown, render_claim,
                             reviewed, validate_claim, validate_review)
-from .dream_sources import read_source, validate_source
+from .dream_sources import check_snapshot, read_source, validate_source
 
 POLICY = 'dreaming/policy.json'
 DISPOSITIONS = 'dreaming/dispositions.json'
@@ -208,7 +208,10 @@ def record_use_filter(store, *, scope='research'):
 
 
 class Dreaming:
-    def __init__(self, store, profile_id, caller, *, publisher=False):
+    def __init__(self, store, profile_id, caller, *, publisher=False, caller_binding='operator-bound'):
+        if caller_binding not in {'operator-bound', 'caller-declared'}:
+            _fail('invalid_input', 'Unsupported caller binding')
+        self.identity_assurance = caller_binding + '; native-session-unverified'
         self.store = store
         self.profile_id = profile_id
         self.caller = deepcopy(caller)
@@ -375,7 +378,7 @@ class Dreaming:
             run = {'version': 1, 'id': run_id, 'profile_id': self.profile_id,
                    'target': target, 'lane': lane, 'generation': 1,
                    'attempts': [{'generation': 1, 'caller': self.caller, 'at': _now(),
-                                 'identity_assurance': 'operator-bound; native-session-unverified'}],
+                                 'identity_assurance': self.identity_assurance}],
                    'phase': 'collecting', 'technical_outcome': 'pending', 'created_at': _now(),
                    'profile_snapshot': profile, 'policy_revision': _digest(policy),
                    'basis': basis, 'working_basis': deepcopy(basis), 'source_revision': source_revision,
@@ -400,7 +403,13 @@ class Dreaming:
                 result.update(issues=[], unresolved=[], access='changed; semantic excerpts withheld')
             return result
 
-    def materials(self, run_id, source_id=None):
+    def materials(self, run_id, source_id=None, *, event_key=None, cursor=None, max_chars=4096):
+        if event_key is not None:
+            if (source_id is None or not isinstance(event_key, str) or not re.fullmatch('[0-9a-f]{64}', event_key)
+                    or type(max_chars) is not int or not 1 <= max_chars <= 16000):
+                _fail('invalid_input', 'Event paging requires source_id, event_key and 1..16000 characters')
+        elif cursor is not None or max_chars != 4096:
+            _fail('invalid_input', 'Material continuation requires an explicit frozen event_key')
         _, profile = self._policy()
         with self.store._gate():
             run = self._run(run_id)
@@ -415,7 +424,58 @@ class Dreaming:
                 item = deepcopy(material)
                 item['events'] = [e for e in item['events'] if not self._forbidden_source(run, e)]
                 output[sid] = item
-            return {'as_of_run': run_id, 'sources': output, 'authority': 'untrusted source data; not execution instructions'}
+            result = {'as_of_run': run_id, 'sources': output, 'authority': 'untrusted source data; not execution instructions'}
+            if event_key is None:
+                return result
+            frozen = next((e for e in output[source_id]['events'] if e['key'] == event_key), None)
+            if frozen is None:
+                _fail('dream_access_denied', 'Event is not in the currently admitted frozen source')
+            spec = deepcopy(snapshot[source_id])
+            version = deepcopy(output[source_id]['version'])
+            binding = _digest([run_id, source_id, event_key, version])
+        # Reconstruct outside the writer gate, using the original cutoff even if
+        # an ordinary history file has subsequently gained an unrelated suffix.
+        initial = None if spec.get('_catalog_page') else {
+            'identity': version['identity'], 'cutoff': version['cutoff'],
+            'prefix_sha256': hashlib.sha256(b'').hexdigest()}
+        reconstructed = read_source(spec, max_bytes=version['consumed'], max_events=1024, cursor=initial)
+        whole = next((e for e in reconstructed['events'] if e['key'] == event_key), None)
+        identity = lambda e: {k: v for k, v in e.items() if k not in {'text', 'excerpt_truncated'}}
+        if (reconstructed['version'] != version or whole is None or identity(whole) != identity(frozen)
+                or check_snapshot(spec, version) != 'valid'):
+            _fail('source_changed', 'Source bytes or their public interpretation differ from the frozen event')
+        text = whole['text']
+        text_digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        offset = 0
+        if cursor is not None:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 512 or not cursor.startswith('material-v1:'):
+                    raise ValueError('Unbounded cursor')
+                position = _decode(cursor[len('material-v1:'):])
+                _keys(position, {'binding', 'text_sha256', 'offset'}, {'binding', 'text_sha256', 'offset'}, 'material cursor')
+                offset = position['offset']
+                if (position['binding'] != binding or position['text_sha256'] != text_digest
+                        or type(offset) is not int or not 0 <= offset < len(text)):
+                    raise ValueError('Cursor is not bound to this frozen text')
+            except (MemoryError, ValueError, TypeError):
+                _fail('invalid_cursor', 'Material cursor does not identify this frozen event and position')
+        end = min(len(text), offset + max_chars)
+        with self.store._gate():
+            current = self._run(run_id)
+            if (current['materials'][source_id]['version'] != version or not self._catalog().authorized(spec)
+                    or self._forbidden_source(current, frozen)):
+                _fail('dream_access_denied', 'Frozen source access changed during material reconstruction')
+        part = deepcopy(frozen)
+        part['text'] = text[offset:end]
+        result['sources'][source_id]['events'] = [part]
+        page_bytes = version['consumed'] - version.get('start', 0)
+        result['page'] = {'event_key': event_key, 'offset': offset, 'end': end, 'total_chars': len(text),
+                          'text_sha256': text_digest,
+                          'next_cursor': 'material-v1:' + _json({'binding': binding, 'text_sha256': text_digest, 'offset': end}) if end < len(text) else None,
+                          'read_bytes': page_bytes,
+                          'verification_bytes': (3 if spec.get('_catalog_page') else 2) * page_bytes,
+                          'notice': 'Text availability only; frozen coverage and semantic review are unchanged.'}
+        return result
 
     def memory(self, run_id, *, query='', limit=8, max_chars=8000):
         """Read admitted target memory, without borrowing a target cwd or raw CRUD."""
@@ -449,7 +509,7 @@ class Dreaming:
                 _fail('closed_run', 'Closed runs cannot be taken over')
             run['generation'] += 1
             run['attempts'].append({'generation': run['generation'], 'caller': self.caller, 'at': _now(),
-                                    'identity_assurance': 'operator-bound; native-session-unverified'})
+                                    'identity_assurance': self.identity_assurance})
             self._save(run)
             return {'status': 'taken-over', 'run_id': run_id, 'generation': run['generation']}
 
@@ -481,7 +541,8 @@ class Dreaming:
                     _fail('source_forbidden', 'Source is no longer permitted for this use')
                 if event.get('evidence') == 'derivative':
                     _fail('derivative_only', 'Derived material is navigation, not independent support')
-                if event.get('harness') in {'pi', 'claude'} and event.get('branch') == 'unspecified':
+                if (event.get('harness') in {'pi', 'claude'} and event.get('branch') == 'unspecified' or
+                        event.get('harness') == 'pi' and event.get('ancestry_verified') is not True):
                     _fail('unverified_branch', 'An event without an explicit verified branch is navigation only')
                 events[ref] = event
                 continue

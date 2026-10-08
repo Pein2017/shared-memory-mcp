@@ -14,6 +14,9 @@ def add_parser(commands):
     config = actions.add_parser('configure', help='Read an explicitly authorized bounded policy JSON from stdin')
     config.add_argument('--expected-revision', default='absent')
     actions.add_parser('capabilities')
+    gateway = actions.add_parser('gateway', help='Launcher-bound profile with explicit caller context on every MCP call')
+    gateway.add_argument('--profile', required=True)
+    gateway.add_argument('--enable-publisher', action='store_true')
     for name in ('start', 'inspect', 'materials', 'freeze', 'diff', 'mark', 'takeover', 'publish',
                  'overview', 'close', 'issue', 'disposition', 'serve', 'catalog', 'audit', 'source-list', 'source-read'):
         command = actions.add_parser(name)
@@ -33,6 +36,9 @@ def add_parser(commands):
             selectors.add_argument('--selectors-stdin', action='store_true', help='Read target_project, sources, reconsider selectors as JSON from stdin')
         if name == 'materials':
             command.add_argument('--source-id', required=True)
+            command.add_argument('--event-key')
+            command.add_argument('--cursor')
+            command.add_argument('--max-chars', type=int, default=4096)
         if name == 'freeze':
             command.add_argument('--reconsider-reason')
         if name == 'close':
@@ -84,6 +90,10 @@ def handle(store, args):
     if action == 'capabilities':
         from .dream_transport import capabilities
         return capabilities()
+    if action == 'gateway':
+        from .dream_gateway import make_dream_gateway
+        make_dream_gateway(store, args.profile, publisher=args.enable_publisher).run(transport='stdio')
+        return None
     caller = {key: getattr(args, key) for key in ('cwd', 'harness', 'session_id', 'actor', 'task_id', 'project_id')
               if getattr(args, key, None) is not None}
     # A CLI process is an operator boundary. Model-facing MCP tools cannot pick
@@ -121,7 +131,8 @@ def handle(store, args):
     if action == 'inspect':
         return engine.inspect(args.run_id)
     if action == 'materials':
-        return engine.materials(args.run_id, args.source_id)
+        return engine.materials(args.run_id, args.source_id, event_key=args.event_key,
+                                cursor=args.cursor, max_chars=args.max_chars)
     if action == 'freeze':
         return engine.freeze(args.run_id, args.generation, _input(), reconsider_reason=args.reconsider_reason)
     if action == 'diff':

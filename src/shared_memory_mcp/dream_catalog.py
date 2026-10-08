@@ -127,7 +127,7 @@ def materialized_page(source):
     state = deepcopy(descriptor['state_before'])
     admitted = set(descriptor['admitted'])
     line = descriptor['line_before']
-    events = []
+    events, gaps = [], []
     with _open_source(source) as stream:
         if _epoch(os.fstat(stream.fileno())) != version['epoch']:
             _fail('source_changed', 'Selected public page changed during reconstruction')
@@ -151,19 +151,29 @@ def materialized_page(source):
                 if not data.endswith(b'\n'):
                     break
                 try:
-                    event, _ = _public(source, json.loads(data), line, state)
+                    event, gap = _public(source, json.loads(data), line, state, raw_digest=hashlib.sha256(data).hexdigest())
                 except (ValueError, TypeError, KeyError, AttributeError):
-                    event = None
-                if event is not None and start in admitted:
+                    event, gap = None, 'malformed_event'
+                if gap:
+                    gaps.append({'reason': gap, 'line': line})
+                if event is not None:
                     event.update(raw_digest=hashlib.sha256(data).hexdigest(), locator=f'line:{line}', byte_start=start)
-                    if source.get('leaf_id'):
+                    if source.get('leaf_id') and source['format'] != 'pi':
                         event['branch'] = source['leaf_id']
                     events.append(event)
+            if source['format'] == 'pi':
+                events, _ = _branches(source, events, gaps, state, 0)
+            events = [e for e in events if e['byte_start'] in admitted]
     # Fence source mutation around the reconstruction, including replacement.
     if _verify(source, version) != 'valid':
         _fail('source_changed', 'Selected public page changed during reconstruction')
+    coverage = deepcopy(descriptor['coverage'])
+    if source['format'] == 'pi' and gaps:
+        coverage['complete'] = False
+        coverage['gaps'] = list({json.dumps(g, sort_keys=True): g for g in [*coverage['gaps'], *gaps]}.values())
+        coverage['events'] = len(events)
     return {'source_id': source['id'], 'events': _decorate(source, events, version), 'version': deepcopy(version),
-            'coverage': deepcopy(descriptor['coverage']), 'cursor': None}
+            'coverage': coverage, 'cursor': None}
 
 
 class SourceCatalog:
@@ -387,7 +397,7 @@ class SourceCatalog:
                         raw_digest = hashlib.sha256(data).hexdigest()
                         try:
                             raw = json.loads(data)
-                            event, gap = _public(spec, raw, line_number, state)
+                            event, gap = _public(spec, raw, line_number, state, raw_digest=raw_digest)
                         except (ValueError, TypeError, KeyError, AttributeError):
                             event, gap = None, 'malformed_event'
                         if gap:
@@ -413,12 +423,16 @@ class SourceCatalog:
                 state.pop('conflicting_ids', None)
                 version = {'epoch': epoch, 'identity': epoch[:2], 'cutoff': epoch[2], 'start': offset,
                            'consumed': position, 'page_sha256': digest.hexdigest(), 'schema': spec['schema']}
+                if spec['format'] == 'codex':
+                    version['native_version'] = state.get('native_version')
                 if position < epoch[2]:
                     gaps.append({'reason': 'bounded_partial', 'next_offset': position})
                 coverage = {'discovered_bytes': epoch[2], 'read_bytes': position-offset, 'verification_bytes': 0,
                     'events': len(events), 'excluded': excluded, 'complete': position==epoch[2] and not gaps, 'gaps': gaps}
                 descriptor = {'version': version, 'state_before': state_before, 'line_before': line_before,
                     'admitted': [e.get('byte_start', offset) for e in events], 'coverage': coverage}
+                if spec['format'] == 'pi':
+                    descriptor['ancestry_revision'] = 1
                 material = {'source_id': spec['id'], 'events': _decorate(spec, events, version),
                     'version': version, 'coverage': coverage, 'cursor': None}
                 body = {'relative': relative, 'leaf_id': spec.get('leaf_id'), 'grant_identity': grant_identity, 'descriptor': descriptor}

@@ -88,10 +88,10 @@ def make_dream_server(engine, run_id=None, generation=None):
         return engine.inspect(run_id)
 
     @server.tool(annotations=readonly)
-    def source_read(source_id: str) -> dict:
+    def source_read(source_id: str, event_key: str | None = None, cursor: str | None = None, max_chars: int = 4096) -> dict:
         """Read a frozen public projection by an operator-allowed source ID, never a path."""
         check()
-        return engine.materials(run_id, source_id)
+        return engine.materials(run_id, source_id, event_key=event_key, cursor=cursor, max_chars=max_chars)
 
     @server.tool(annotations=readonly)
     def memory_read(query: str = '', limit: int = 8, max_chars: int = 8000) -> dict:
@@ -208,9 +208,10 @@ def _make_general_server(engine):
         return engine.takeover(run_id, generation)
 
     @server.tool(annotations=readonly)
-    def run_materials(run_id: str, source_id: str | None = None) -> dict:
+    def run_materials(run_id: str, source_id: str | None = None, event_key: str | None = None,
+                      cursor: str | None = None, max_chars: int = 4096) -> dict:
         """Read frozen admitted material of an authorized Run."""
-        return engine.materials(run_id, source_id)
+        return engine.materials(run_id, source_id, event_key=event_key, cursor=cursor, max_chars=max_chars)
 
     @server.tool(annotations=append)
     def draft_submit(run_id: str, generation: int, operations: list[dict], reconsider_reason: str | None = None) -> dict:

@@ -1,12 +1,13 @@
 """Bounded public projections. Never import a native session loader or write a source.
 
-This module recognizes explicitly selected wire schemas, not arbitrary historical
-versions. Role=user is deliberately not human attribution. Attestations belong to
+This module recognizes explicitly selected wire schemas, not arbitrary native
+event shapes. Producer releases are provenance. Role=user is not human attribution. Attestations belong to
 operator policy and bind an exact raw event digest, never model-supplied prose.
 """
 from __future__ import annotations
 
 from contextlib import contextmanager
+from copy import deepcopy
 import hashlib
 import os
 from pathlib import Path
@@ -36,7 +37,7 @@ def validate_source(source):
     p = Path(source['path'])
     if not p.is_absolute() or '..' in p.parts or p.name in {'AGENTS.md', 'SKILL.md', '.env'}:
         _fail('unsafe_source', 'Source must be an explicit absolute non-instruction file')
-    if source['format'] in {'codex', 'claude'}:
+    if source['format'] == 'claude' or 'native_version' in source:
         _nonempty(source.get('native_version'), 'source.native_version')
     if type(source.get('derived', False)) is not bool:
         _fail('invalid_input', 'derived must be boolean')
@@ -122,7 +123,33 @@ def _text(content):
                      and isinstance(x.get('text'), str))
 
 
-def _public(source, raw, line, state):
+def _pi_structure(raw, state, raw_digest):
+    """Keep ancestry metadata for private entries, never their payloads."""
+    kind, identifier, parent = raw.get('type'), raw.get('id'), raw.get('parentId')
+    recognized = kind in {'message', 'model_change', 'thinking_level_change', 'label', 'custom', 'session_info'}
+    if kind == 'message':
+        recognized = isinstance(raw.get('message'), dict) and raw['message'].get('role') in {'user', 'assistant', 'toolResult', 'system'}
+    valid = (isinstance(identifier, str) and 0 < len(identifier) <= 256 and 'parentId' in raw and
+             (parent is None or isinstance(parent, str) and 0 < len(parent) <= 256))
+    parents = state.setdefault('pi_structure', {})
+    if not isinstance(identifier, str) or not 0 < len(identifier) <= 256:
+        return 'missing_event_identity'
+    node = {'parent': parent if valid else None, 'digest': raw_digest, 'recognized': recognized and valid}
+    if identifier in parents and parents[identifier] != node:
+        parents[identifier]['recognized'] = False
+        return 'conflicting_event_identity'
+    if identifier not in parents:
+        if len(parents) >= MAX_EVENTS:
+            _fail('source_limit', 'Pi structural identity window exhausted; select a bounded history')
+        parents[identifier] = node
+    if not valid:
+        return 'compaction_originals_not_proven' if kind in {'compaction', 'branch_summary'} else 'missing_parent_identity'
+    if not recognized:
+        return 'compaction_originals_not_proven' if kind in {'compaction', 'branch_summary'} else 'unknown_event_schema'
+    return None
+
+
+def _public(source, raw, line, state, *, raw_digest=None):
     """Return (event or None, gap or None); private/system/tool payloads are excluded."""
     fmt = source['format']
     kind = raw.get('type')
@@ -137,11 +164,12 @@ def _public(source, raw, line, state):
                 return None, 'inherited_session_metadata'
             state['header_seen'] = True
             state['valid'] = False
-            if native is not None and payload.get('cli_version') != native:
+            release = payload.get('cli_version')
+            if not isinstance(release, str) or not release or len(release) > 128:
                 return None, 'unknown_native_version'
             if not isinstance(payload.get('id'), str):
                 return None, 'missing_session_identity'
-            state.update(session=payload['id'], valid=True,
+            state.update(session=payload['id'], valid=True, native_version=release,
                          parent=payload.get('forked_from_id'),
                          delegated=bool(payload.get('source') == 'subagent' or
                                         isinstance(payload.get('source'), dict)))
@@ -150,6 +178,16 @@ def _public(source, raw, line, state):
             return None, 'missing_or_unknown_header'
         if kind in {'compacted', 'compaction'}:
             return None, 'compaction_originals_not_proven'
+        if kind in {'world_state', 'token_usage_record'}:
+            payload = raw.get('payload')
+            if not isinstance(payload, dict):
+                return None, 'unknown_event_schema'
+            if kind == 'world_state':
+                known = type(payload.get('full')) is bool and isinstance(payload.get('state'), dict)
+            else:
+                known = (all(isinstance(payload.get(k), dict) for k in ('usage', 'turn_token_usage', 'thread_token_usage')) and
+                         all(isinstance(payload.get(k), str) for k in ('thread_id', 'turn_id', 'session_id', 'root_turn_id', 'response_id')))
+            return None, None if known else 'unknown_event_schema'
         if kind in {'event_msg', 'turn_context'}:
             # event_msg duplicates public response_item text; it is not extra evidence.
             return None, None
@@ -157,7 +195,8 @@ def _public(source, raw, line, state):
             return None, 'unknown_event_schema'
         payload = raw.get('payload', {})
         if payload.get('type') != 'message':
-            return None, None
+            return None, None if payload.get('type') in {'reasoning', 'function_call', 'function_call_output',
+                                                       'custom_tool_call', 'custom_tool_call_output'} else 'unknown_event_schema'
         role = payload.get('role')
         content = payload.get('content')
         event_id, parent = raw.get('id', f'line:{line}'), None
@@ -167,10 +206,16 @@ def _public(source, raw, line, state):
             if raw.get('version') != 3 or not isinstance(raw.get('id'), str):
                 state['valid'] = False
                 return None, 'unknown_native_version'
+            if state.get('session', raw['id']) != raw['id']:
+                state['valid'] = False
+                return None, 'mixed_session_identity'
             state.update(session=raw['id'], valid=True, parent=raw.get('parentSession'))
             return None, None
         if not state.get('valid'):
             return None, 'missing_or_unknown_header'
+        structural_gap = _pi_structure(raw, state, raw_digest or _digest(raw))
+        if structural_gap:
+            return None, structural_gap
         if kind in {'compaction', 'branch_summary'}:
             return None, 'compaction_originals_not_proven'
         if kind in {'model_change', 'thinking_level_change', 'label', 'custom', 'session_info'}:
@@ -222,7 +267,8 @@ def _public(source, raw, line, state):
     return {'session': state['session'], 'event_id': event_id, 'parent': parent,
             'session_parent': state.get('parent'), 'role': role, 'text': text,
             'timestamp': raw.get('timestamp', payload.get('timestamp')),
-            'delegated': delegated, 'branch': 'unspecified'}, None
+            'delegated': delegated, 'branch': 'unspecified',
+            **({'native_version': state['native_version']} if fmt == 'codex' else {})}, None
 
 
 def check_snapshot(source, version):
@@ -272,7 +318,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     if type(offset) is not int or not 0 <= offset <= MAX_BYTES:
         _fail('source_limit', 'Cursor verification exceeds the bounded history window')
     events, gaps, excluded = [], [], 0
-    state = dict(cursor.get('state', {}))
+    state = deepcopy(cursor.get('state', {}))
     seen = dict(cursor.get('seen', {}))
     line = cursor.get('line', 0)
     digest = hashlib.sha256()
@@ -353,7 +399,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                         raw = _decode(data.decode('utf-8'))
                         if not isinstance(raw, dict):
                             raise ValueError('Not an event object')
-                        event, gap = _public(source, raw, line, state)
+                        event, gap = _public(source, raw, line, state, raw_digest=raw_digest)
                     except (ValueError, TypeError, KeyError, AttributeError):
                         event, gap = None, 'malformed_event'
                     if gap:
@@ -395,6 +441,8 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     events, excluded = _branches(source, events, gaps, state, excluded)
     version = {'identity': identity, 'cutoff': cutoff, 'consumed': position,
                'prefix_sha256': digest.hexdigest(), 'schema': source['schema']}
+    if source['format'] == 'codex':
+        version['native_version'] = state.get('native_version')
     for event in events:
         attestation = source.get('attestations', {}).get(event['raw_digest'])
         human = bool(event['role'] == 'user' and not event['delegated'] and attestation)
@@ -415,17 +463,19 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
 
 def _branches(source, events, gaps, state, excluded):
     if source['format'] == 'pi':
-        parents = {x['event_id']: x['parent'] for x in events}
+        parents = state.get('pi_structure', {})
         leaf = source.get('leaf_id')
         if leaf:
             selected, current = set(), leaf
-            while current in parents and current not in selected:
+            while (isinstance(current, str) and current in parents and current not in selected and
+                   parents[current]['recognized'] and state.get('valid')):
                 selected.add(current)
-                current = parents[current]
+                current = parents[current]['parent']
             if current is not None:
                 gaps.append({'reason': 'branch_ancestry_not_in_window'})
+                selected.clear()
             excluded += sum(x['event_id'] not in selected for x in events)
-            events = [{**x, 'branch': leaf} for x in events if x['event_id'] in selected]
+            events = [{**x, 'branch': leaf, 'ancestry_verified': True} for x in events if x['event_id'] in selected]
         else:
             gaps.append({'reason': 'active_branch_unverified'})
     elif source['format'] == 'claude':

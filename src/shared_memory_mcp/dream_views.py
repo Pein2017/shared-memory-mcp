@@ -20,9 +20,31 @@ def _disposition_revision(store, target, view):
     return _digest([d for d in dispositions(store)['items'] if d['target'] == target and d['scope'] == view])
 
 
+def _read_policy_revision(policy, profile, document):
+    scenarios = {s for claim in document['claims'] for s in claim['scenarios']}
+    grant_ids = {source['spec']['_grant_id'] for source in document['sources'].values()}
+    collab = document['view'] == 'collaboration' or any(
+        d['type'] == 'collaboration' for d in document['dependencies'].values())
+    inferred = collab and any(c.get('level') == 'inferred'
+                             for c in [*document['claims'], *document['dependencies'].values()])
+    projects = {p for claim in document['claims'] for p in claim['projects']} if collab else set()
+    return _digest({'version': policy['version'], 'subject': policy['subject'],
+                    'target_allowed': document['target'] in profile['target_projects'],
+                    'scenarios': sorted(scenarios.intersection(profile['scenarios'])),
+                    'grants': {g['id']: g for g in profile['source_grants'] if g['id'] in grant_ids},
+                    'collaboration_projects': sorted(projects.intersection(policy['collaboration_projects'])),
+                    'allow_inferred': profile['allow_inferred'] if inferred else None})
+
+
+def _policy_matches(document, policy, profile):
+    if 'read_policy_revision' not in document:
+        return document['policy_revision'] == _digest(policy)
+    return document['read_policy_revision'] == _read_policy_revision(policy, profile, document)
+
+
 def prepare_view(engine, run, operation, source_checks):
     """Caller holds the writer gate; external freshness observations are precomputed."""
-    from .dreaming import dispositions, compact_source_spec
+    from .dreaming import compact_source_spec
     policy, profile = engine._policy()
     profile = engine._effective(run)
     view = operation['view']
@@ -52,24 +74,34 @@ def prepare_view(engine, run, operation, source_checks):
                 'as_of': _now(), 'run_id': run['id'],
                 'operation': {'key': operation['key'], 'digest': operation['digest']},
                 'review_executor': engine.caller, 'coverage': run['coverage']}
+    for sid, source in document['sources'].items():
+        if source['format'] == 'pi':
+            source['ancestry_verified'] = all(e.get('ancestry_verified') is True
+                                              for e in events.values() if e['source_id'] == sid)
+            if not source['ancestry_verified']:
+                _fail('unverified_branch', 'A Pi view requires verified structural ancestry')
+    document['read_policy_revision'] = _read_policy_revision(policy, profile, document)
     revision = _digest(document)
     pointer = {'version': 1, 'revision': revision, 'operation': document['operation'], 'activated_by': engine.caller}
     return [(base + f'/revisions/{revision}.json', (_json(document) + '\n').encode()),
             (base + '/current.json', (_json(pointer) + '\n').encode())]
 
 
-def _navigation(view, status, reason, revision=None):
-    return {'status': status, 'view': view, 'text': '', 'revision': revision,
-            'navigation': reason, 'references': [], 'chars': 0, 'bytes': 0}
+def _navigation(view, status, reason, revision=None, *, available_scenarios=None):
+    result = {'status': status, 'view': view, 'text': '', 'revision': revision,
+              'navigation': reason, 'references': [], 'chars': 0, 'bytes': 0}
+    if available_scenarios is not None:
+        result['available_scenarios'] = sorted(available_scenarios)
+    return result
 
 
 def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, historical=None, target_project=None):
-    from .dreaming import dispositions
     policy, profile = engine._policy()
     target = engine._target(profile, target_project)
     profile = {**profile, 'target_project': target}
     if scenario not in profile['scenarios']:
-        return _navigation(view, 'navigation', 'Select an authorized task scenario before loading a view')
+        return _navigation(view, 'navigation', 'Select an authorized task scenario before loading a view',
+                           available_scenarios=profile['scenarios'])
     base = _base(profile['target_project'], view)
     if historical is not None and (not isinstance(historical, str) or not re.fullmatch('[0-9a-f]{64}', historical)):
         _fail('invalid_input', 'Historical access requires an exact view revision')
@@ -82,8 +114,10 @@ def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, histori
     document = read_json(engine.store, base + f'/revisions/{revision}.json')
     if not document or _digest(document) != revision or document.get('view') != view or document.get('target') != profile['target_project']:
         return _navigation(view, 'unverifiable', 'View revision or dependencies cannot be verified', revision)
-    if document['policy_revision'] != _digest(policy) or document['disposition_revision'] != _disposition_revision(engine.store, profile['target_project'], view):
+    if not _policy_matches(document, policy, profile) or document['disposition_revision'] != _disposition_revision(engine.store, profile['target_project'], view):
         return _navigation(view, 'invalidated', 'Access policy or source disposition changed; refresh without replaying old claims', revision)
+    if any(s['format'] == 'pi' and s.get('ancestry_verified') is not True for s in document['sources'].values()):
+        return _navigation(view, 'unverifiable', 'Pi ancestry is unverified; review and republish from a verified branch', revision)
     specs = {sid: source['spec'] for sid, source in document['sources'].items()
              if engine._catalog(profile).authorized(source['spec'])}
     source_states = []
@@ -95,7 +129,11 @@ def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, histori
         source_states.append(check_snapshot(spec, source['version']))
     with engine.store._gate():
         current_policy, current_profile = engine._policy()
-        if document['policy_revision'] != _digest(current_policy) or document['disposition_revision'] != _disposition_revision(engine.store, profile['target_project'], view):
+        engine._target(current_profile, target)
+        if (scenario not in current_profile['scenarios'] or
+                not _policy_matches(document, current_policy, current_profile) or
+                document['disposition_revision'] != _disposition_revision(engine.store, target, view) or
+                not all(engine._catalog(current_profile).authorized(s['spec']) for s in document['sources'].values())):
             return _navigation(view, 'invalidated', 'Access changed during the bounded dependency check', revision)
         project_records = {r['id']: r for r in projected_records(engine.store, profile['target_project'])}
         collaboration_records = {r['id']: r for r in collaboration(engine.store)}
@@ -115,8 +153,13 @@ def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, histori
             return _navigation(view, 'unverifiable', 'Source moved or its frozen prefix is unavailable; verify the owner/path', revision)
         if stale and historical is None:
             return _navigation(view, 'stale', 'Owner or curation changed; refresh the research snapshot before using its progress claims', revision)
-        char_cap = profile['budgets']['view_chars']
-        byte_cap = profile['budgets']['view_bytes']
+        available = {s for claim in document['claims'] if target in claim['projects']
+                     for s in claim['scenarios'] if s in current_profile['scenarios']}
+        if scenario not in available:
+            return _navigation(view, 'navigation', 'No claims match this scenario; select an available scenario',
+                               revision, available_scenarios=available)
+        char_cap = current_profile['budgets']['view_chars']
+        byte_cap = current_profile['budgets']['view_bytes']
         for value in (max_chars, max_bytes):
             if value is not None and (type(value) is not int or value < 0):
                 _fail('invalid_input', 'View budgets must be nonnegative integers')
