@@ -1,5 +1,7 @@
 # Source implementation acceptance, 2026-10-09
 
+> **Archival update (2026-10-09):** The user withdrew historical batch-preparation task 8.2. It was never completed under this change and has been removed from the active checklist, not checked off. The dated pending statements below remain original acceptance history; [scope closure](scope-closure.md) supersedes them for current planning. Separately executed Dreaming does not imply full historical coverage or authorize more ingestion.
+
 **Verdict: SOURCE ACCEPTED; LOCAL CODEX / PI CONFIGURATION ACTIVATED.** The user subsequently authorized repairing the acceptance findings and enabling Codex and Pi Web, with Luna-Max handling needed memory migration. The scoped installation and configuration migration below supersede the earlier live-activation HOLD. This covers the modified worktrees and local configuration, not WebCodex server deployment, complete historical memory, or uptake by every running session. No service restart, canonical-memory publication, paid-model work, historical bootstrap, commit or push was performed.
 
 **Primary source:** `/data/CoordExp/codex-tools/shared-memory-mcp` (observed HEAD `fb54e2a3352bf3252c190ffef956ac727cd0e96e`). **Conditional integration:** `/data/CoordExp/codex-tools/web-codex` (observed HEAD `094d5c062f3b6e7863582c28ffea92e09eafc779`). The current change consists of uncommitted work and previously existing dirty changes; inspect fresh `git status`/diff before replay, deployment or another writer.

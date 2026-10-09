@@ -1,4 +1,4 @@
-Implementation checklist for the receiving web-codex session. Completed source-implementation tasks are checked only where acceptance.md records current verification; task 8.2 remains pending because exact historical native event selectors require a separately authorized inventory. Planning, archival and the old content trial are not substitute implementation evidence. Use the actual dirty checkout and preserve other sessions' work. Complete disposable/source and actual consumer checks before proposing any live rollout. No task in this checklist authorizes a production-memory pilot, paid model call, service restart or broad history ingestion.
+Implementation checklist for the receiving web-codex session. Completed source-implementation tasks are checked only where acceptance.md records current verification; the historical first-batch planning task 8.2 was withdrawn by the user on 2026-10-09, not completed. Planning, archival and the old content trial are not substitute implementation evidence. Use the actual dirty checkout and preserve other sessions' work. Complete disposable/source and actual consumer checks before proposing any live rollout. No task in this checklist authorizes a production-memory pilot, paid model call, service restart or broad history ingestion.
 
 ## 1. Bind observable seams and prove the correction-to-consumer slice
 
@@ -59,14 +59,14 @@ Implementation checklist for the receiving web-codex session. Completed source-i
 ## 8. Deliver reviewable rollout and bootstrap plans
 
 - [x] 8.1 Produce a reviewable installation/cutover plan for the then-current owned settings, with backup and rollback locations; verify in configuration fixtures that the plan removes only the old owned separate connection, preserves active sessions and leaves one configured common integration.
-- [ ] 8.2 Prepare a bounded first historical batch from `.worktrees/` knowledge owners and relevant Codex/Pi segments, with actual source selection, cutoff/branch, output owner, cost/size limits and stop condition; verify scope resolution, existing-memory deduplication and exclusions before ingestion.
+The former 8.2 first-historical-batch task was cancelled, not checked or performed under this change. See [scope-closure.md](scope-closure.md); the dated proposal in `rollout-plan.md` is retained only for provenance.
 - [x] 8.3 Record final technical acceptance with a source/consumer matrix separating disposable publication, explicit read, native request delivery or WebCodex automatic server result, separately observed/unverified Host presentation, planned production rollout, historical coverage and deferred model benefit; verify every checked task has current evidence and keep the user-deferred model-quality comparison unclaimed.
 
 ## Deferred production execution
 
 Live installation/cutover and real historical bootstrap are separately requested work, not implicit effects of applying this checklist. Once requested, use the reviewed owned-settings plan, preserve active sessions/native stores, inspect fresh consumers, and run only the selected bounded `.worktrees/`, `codex-tools/` or mixed-root batches with terminal receipts and partial coverage. Historical paid-model recipes, whole-harness isolation and a model-quality comparison are not implementation requirements here. A missing required source/consumer boundary remains explicitly incomplete; deferred production work is reported separately rather than passed by a fixture.
 
-The subsequently requested Codex/Pi local activation and required configuration migration were completed on 2026-10-09; see `acceptance.md`. Task 8.2 historical ingestion remains pending.
+The subsequently requested Codex/Pi local activation and required configuration migration were completed on 2026-10-09; see `acceptance.md`. The optional 8.2 historical-first-batch plan was subsequently withdrawn on 2026-10-09; neither ingestion nor complete historical coverage is claimed under this change.
 
 ## 9. Apply feedback from the user's real Dreaming execution
 

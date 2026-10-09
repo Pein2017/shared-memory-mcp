@@ -36,13 +36,6 @@ Memory SHALL retain usable pointers to formal research and evidence owners. A Dr
 - **WHEN** Dreaming finds sourced material that could clarify the formal research narrative
 - **THEN** it records the current decision with its provenance and leaves an owner-update proposal rather than silently rewriting the formal page
 
-### Requirement: Phased historical bootstrap
-The first broad bootstrap SHALL prioritize canonical knowledge owners under `.worktrees/` and related Codex/Pi task history, then independent `codex-tools/` projects, then mixed root sessions. Each batch SHALL declare selected sources, bounds, outputs and its stop condition. Directory location SHALL remain a prior, and unresolved historical paths SHALL remain explicit.
-
-#### Scenario: Mixed root history is reviewed after research owners
-- **WHEN** a batch reaches `/data/CoordExp` root sessions
-- **THEN** it classifies task segments by content and original scope, deduplicates existing memory, and does not assume every root event is general work
-
 ### Requirement: Bounded qualification claims
 Acceptance SHALL separately report publication, explicit reading, automatic final-context delivery, source/review coverage and model use or benefit. The user-deferred model-quality study MUST NOT be treated as completed by deterministic checks, and a bounded content pilot MUST NOT count as full historical bootstrap.
 

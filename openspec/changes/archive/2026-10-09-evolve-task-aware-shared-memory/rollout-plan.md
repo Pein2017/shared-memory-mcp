@@ -1,6 +1,6 @@
-# Reviewable rollout and historical-first-batch plan
+# Reviewable rollout and withdrawn historical-first-batch proposal
 
-**Status:** scoped local Codex/Pi activation completed on 2026-10-09 under the user's subsequent repair-and-enable request; see [acceptance.md](acceptance.md#repair-and-local-activation-receipt-2026-10-09). The historical batch below remains a proposal. This document grants no additional authority for ingestion, canonical-memory publication, model calls, server deployment, restart, commit or push.
+**Status:** scoped local Codex/Pi activation completed on 2026-10-09 under the user's subsequent repair-and-enable request; see [acceptance.md](acceptance.md#repair-and-local-activation-receipt-2026-10-09). The historical batch below was explicitly withdrawn from this change on 2026-10-09 and is retained only as dated planning evidence. This document grants no additional authority for ingestion, canonical-memory publication, model calls, server deployment, restart, commit or push.
 
 ## Source and deployment boundary
 
@@ -29,7 +29,9 @@
 
 Failure to satisfy a required server/native boundary means **hold that consumer**, not "retry with a new Session" or use a second memory provider. Roll back **only** the owned new registration/hook/extension from the exact saved configuration snapshot, after fencing for subsequent unrelated edits. Preserve canonical records, source-use bans, historical receipts and native memories. Older binaries cannot safely be pointed at unsupported new collection formats; do not relabel a format downgrade as rollback.
 
-## First historical batch proposal (deferred, not performed)
+## Withdrawn first historical batch proposal (not an active task)
+
+**Superseded 2026-10-09:** The user cancelled the former 8.2 requirement because Dreaming had already been exercised through separately authorized workflows. The following selection and envelope were not finalized or executed under this change; do not schedule, ingest, or interpret this as an outstanding admission gate. Future history work, if explicitly requested, requires its own current source/branch/grant checks.
 
 Proposed initial owner **selection**, from the current read-only CoordExp example manifest:
 
