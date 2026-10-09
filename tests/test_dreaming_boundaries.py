@@ -201,20 +201,74 @@ def test_close_checkpoint_crash_recovers_without_new_model_work(tmp_path, monkey
     assert engine.start()['status'] == 'no-change'
 
 
-def test_repair_and_elapsed_budgets_are_enforced_before_effect(tmp_path, monkeypatch):
-    engine, store, _, _, policy, *_ = environment(tmp_path)
-    set_policy(store, policy, lambda p: p['budgets'].update(repair_rounds=1))
+def test_old_valid_run_can_freeze_publish_and_review_issue(tmp_path, monkeypatch):
+    engine, store, *_ = environment(tmp_path)
     rid, gen, key, _ = begin(engine)
-    freeze_publish(engine, rid, gen, [record_op('A', claim(key))])
-    freeze_publish(engine, rid, gen, [record_op('B', claim(key))])
-    with pytest.raises(MemoryError) as error:
-        engine.freeze(rid, gen, [record_op('C', claim(key))])
-    assert error.value.code == 'draft_limit' and len(store._load('demo')) == 2
     import shared_memory_mcp.dreaming as module
     monkeypatch.setattr(module, '_now', lambda: '2099-01-01T00:00:00Z')
+    _, result = freeze_publish(engine, rid, gen, [record_op('A', claim(key))])
+    assert result['status'] == 'applied' and len(store._load('demo')) == 1
+    assert engine.suggest_issue(rid, gen, topic='X', relation='owner', note='fixture', observations={})['needs_semantic_review']
+
+
+def test_repeated_bounded_reads_and_draft_repairs_can_exceed_former_totals(tmp_path):
+    engine, store, _, _, policy, owner, _ = environment(tmp_path)
+    set_policy(store, policy, lambda p: p['budgets'].update(source_bytes=512))
+    run = engine.start(sources=[{'grant_id': 'owner'}])
+    assert set(run['budgets']) == {'source_bytes', 'events', 'operations', 'view_chars', 'view_bytes'}
+    rid, gen = run['run_id'], run['generation']
+    key = engine.materials(rid, 'owner')['sources']['owner']['events'][0]['key']
+    read_bytes = 0
+    for _ in range(12):
+        part = engine.materials(rid, 'owner', event_key=key, max_chars=32)
+        assert part['sources']['owner']['events'][0]['text'] == owner.read_text()[:32]
+        read_bytes += part['page']['read_bytes'] + part['page']['verification_bytes']
+    assert read_bytes > run['budgets']['source_bytes']
+    for index in range(12):
+        frozen = engine.freeze(rid, gen, [record_op('repair-' + str(index), claim(key))],
+                               reconsider_reason='Explicit fixture repair of the pending draft')
+        if index % 3 == 2:
+            assert engine.publish(rid, gen, frozen['draft_revision'])['status'] == 'applied'
+    state = engine.inspect(rid)
+    assert len(state['drafts']) == 12 and state['read_bytes'] > run['budgets']['source_bytes']
+    assert len(store._load('demo')) == 4
+    before = state['read_bytes']
+    replay = engine.publish(rid, gen, frozen['draft_revision'])
+    assert replay['applied'][0]['replayed'] and engine.inspect(rid)['read_bytes'] == before
+
+
+def test_single_draft_operation_bound_is_still_enforced(tmp_path):
+    engine, store, *_ = environment(tmp_path)
+    rid, gen, key, _ = begin(engine)
     with pytest.raises(MemoryError) as error:
-        engine.suggest_issue(rid, gen, topic='X', relation='owner', note='fixture', observations={})
-    assert error.value.code == 'run_budget_exhausted'
+        engine.freeze(rid, gen, [record_op('op-' + str(i), claim(key)) for i in range(17)])
+    assert error.value.code == 'draft_limit'
+    assert engine.inspect(rid)['drafts'] == [] and store._load('demo') == []
+
+
+def test_single_draft_byte_bound_is_still_enforced(tmp_path):
+    engine, store, *_ = environment(tmp_path)
+    rid, gen, key, _ = begin(engine)
+    c = {**claim(key, text='x' * 8192), 'conditions': 'x' * 8192}
+    operations = [{**view_op(identifier, c), 'claims': [deepcopy(c) for _ in range(32)]}
+                  for identifier in ['A', 'B']]
+    with pytest.raises(MemoryError) as error:
+        engine.freeze(rid, gen, operations)
+    assert error.value.code == 'dream_limit'
+    assert engine.inspect(rid)['drafts'] == [] and store._load('demo') == []
+
+
+def test_source_verification_has_no_cumulative_run_cap(tmp_path):
+    engine, store, _, _, policy, *_ = environment(tmp_path)
+    set_policy(store, policy, lambda p: p['budgets'].update(source_bytes=512))
+    run = engine.start(sources=[{'grant_id': 'owner'}])
+    rid, gen = run['run_id'], run['generation']
+    key = engine.materials(rid, 'owner')['sources']['owner']['events'][0]['key']
+    for identifier in ['A', 'B', 'C']:
+        _, published = freeze_publish(engine, rid, gen, [record_op(identifier, claim(key))])
+        assert published['status'] == 'applied', published
+    assert engine.inspect(rid)['read_bytes'] > run['budgets']['source_bytes']
+    assert len(store._load('demo')) == 3
 
 
 def test_report_cannot_be_laundered_as_recorded_through_view(tmp_path):

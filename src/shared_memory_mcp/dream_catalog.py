@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 
 from .core import MemoryError, _digest, _fail, _keys
-from .dream_sources import (MAX_BYTES, MAX_EVENTS, MAX_LINE, SECRET, _open, _open_source, _public,
+from .dream_sources import (MAX_BYTES, MAX_EVENTS, MAX_LINE, MAX_NATIVE_EVENT, PI_STRUCTURE_REVISION, SECRET, _open, _open_source, _native_line, _native_public,
                             _branches, validate_source)
 
 MAX_HANDLES = 512
@@ -118,7 +118,52 @@ def _decorate(source, events, version):
     return events
 
 
-def materialized_page(source):
+def _resolve_pi_structure(source, stream, cutoff, *, reference=None, db=None):
+    """Resolve an exact epoch/grant-bound graph in the existing rebuildable cache."""
+    cache = source['_structure_cache']
+    epoch = _epoch(os.fstat(stream.fileno()))
+    if reference is not None and reference.get('projection_revision') != PI_STRUCTURE_REVISION:
+        _fail('unsupported_structure_revision', 'Frozen Pi structural projection revision is unsupported; select a fresh source page')
+    binding = _digest([cache['owner'], epoch, cutoff, PI_STRUCTURE_REVISION])
+    if reference is not None and (reference.get('cache_key') != binding or
+                                  reference.get('epoch') != epoch or reference.get('cutoff') != cutoff):
+        _fail('source_changed', 'Pi structural reference does not match the current source/grant epoch')
+    owned = db is None
+    if owned:
+        Path(cache['path']).parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(cache['path'])
+    try:
+        if owned:
+            db.execute('BEGIN IMMEDIATE')
+        db.execute('CREATE TABLE IF NOT EXISTS structures (token TEXT PRIMARY KEY, body TEXT)')
+        row = db.execute('SELECT body FROM structures WHERE token=?', (binding,)).fetchone()
+        structure_bytes = 0
+        if row:
+            metadata = json.loads(row[0])
+        else:
+            from .dream_sources import _scan_pi_structure
+            metadata = _scan_pi_structure(source, stream, cutoff)
+            structure_bytes = cutoff
+        digest = _digest({k: v for k, v in metadata.items() if k != 'sha256'})
+        if (metadata.get('sha256') != digest or metadata.get('projection_revision') != PI_STRUCTURE_REVISION or metadata.get('epoch') != epoch or
+                metadata.get('cutoff') != cutoff or reference is not None and reference.get('sha256') != digest):
+            _fail('source_changed', 'Pi structural cache/rebuild differs from the frozen graph digest')
+        if not row:
+            if db.execute('SELECT count(*) FROM structures').fetchone()[0] >= MAX_HANDLES:
+                db.execute('DELETE FROM structures WHERE rowid=(SELECT min(rowid) FROM structures)')
+            db.execute('INSERT INTO structures VALUES (?,?)', (binding, json.dumps(metadata)))
+        if _epoch(os.fstat(stream.fileno())) != epoch:
+            _fail('source_changed', 'Pi source changed during graph resolution')
+        if owned:
+            db.commit()
+        return metadata, {'cache_key': binding, 'sha256': digest, 'epoch': epoch, 'cutoff': cutoff,
+                          'projection_revision': PI_STRUCTURE_REVISION}, structure_bytes
+    finally:
+        if owned:
+            db.close()
+
+
+def materialized_page(source, *, db=None):
     """Reconstruct one selected page from original bytes; never persist its text."""
     descriptor = source['_catalog_page']
     version = descriptor['version']
@@ -131,6 +176,12 @@ def materialized_page(source):
     with _open_source(source) as stream:
         if _epoch(os.fstat(stream.fileno())) != version['epoch']:
             _fail('source_changed', 'Selected public page changed during reconstruction')
+        structure_bytes = 0
+        if source['format'] == 'pi' and state.get('pi_metadata') and state['pi_metadata'].get('projection_revision') != PI_STRUCTURE_REVISION:
+            _fail('unsupported_structure_revision', 'Frozen Pi structural projection revision is unsupported; select a fresh source page')
+        if source['format'] == 'pi' and 'cache_key' in state.get('pi_metadata', {}):
+            metadata, _, structure_bytes = _resolve_pi_structure(source, stream, version['cutoff'], reference=state['pi_metadata'], db=db)
+            state['pi_metadata'] = metadata
         stream.seek(version['start'])
         if source['format'] == 'document':
             data = stream.read(version['consumed'] - version['start'])
@@ -141,19 +192,16 @@ def materialized_page(source):
         else:
             while stream.tell() < version['consumed']:
                 start = stream.tell()
-                data = stream.readline(min(MAX_LINE + 1, version['consumed'] - start))
-                if len(data) > MAX_LINE or state.get('draining'):
-                    if not state.get('draining'):
-                        line += 1
-                    state['draining'] = not data.endswith(b'\n')
+                continuing = bool(state.get('draining'))
+                data, framing_gap, _ = _native_line(stream, version['consumed'], state)
+                if framing_gap:
+                    gaps.append({'reason': framing_gap, 'line': line + 1})
+                    if stream.tell() == start:
+                        break
+                    line += not continuing
                     continue
                 line += 1
-                if not data.endswith(b'\n'):
-                    break
-                try:
-                    event, gap = _public(source, json.loads(data), line, state, raw_digest=hashlib.sha256(data).hexdigest())
-                except (ValueError, TypeError, KeyError, AttributeError):
-                    event, gap = None, 'malformed_event'
+                event, gap = _native_public(source, data, line, state)
                 if gap:
                     gaps.append({'reason': gap, 'line': line})
                 if event is not None:
@@ -168,6 +216,8 @@ def materialized_page(source):
     if _verify(source, version) != 'valid':
         _fail('source_changed', 'Selected public page changed during reconstruction')
     coverage = deepcopy(descriptor['coverage'])
+    coverage['structure_bytes'] = structure_bytes
+    coverage['verification_bytes'] += structure_bytes
     if source['format'] == 'pi' and gaps:
         coverage['complete'] = False
         coverage['gaps'] = list({json.dumps(g, sort_keys=True): g for g in [*coverage['gaps'], *gaps]}.values())
@@ -187,6 +237,7 @@ class SourceCatalog:
         self.dbpath.parent.mkdir(parents=True, exist_ok=True)
         db = sqlite3.connect(self.dbpath)
         db.execute('CREATE TABLE IF NOT EXISTS handles (token TEXT PRIMARY KEY, profile TEXT, grant_digest TEXT, kind TEXT, body TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS structures (token TEXT PRIMARY KEY, body TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS identities (pass_id TEXT, event_id TEXT, digest TEXT, PRIMARY KEY(pass_id,event_id))')
         return db
 
@@ -226,6 +277,11 @@ class SourceCatalog:
             if grant['id'] == grant_id:
                 return grant
         _fail('dream_access_denied', 'Source grant is not authorized')
+
+    def _structure_owner(self, spec, grant, relative, grant_identity):
+        if spec['format'] == 'pi':
+            spec['_structure_cache'] = {'path': str(self.dbpath),
+                'owner': _digest([self.profile_id, _digest(grant), relative, grant_identity])}
 
     def _spec(self, selection):
         _keys(selection, {'grant_id'}, {'grant_id', 'path', 'relative_path', 'leaf_id', 'page'}, 'source selection')
@@ -304,6 +360,7 @@ class SourceCatalog:
             if grant['kind'] == 'directory':
                 spec['_grant_root'] = grant['path']
                 spec['_grant_identity'] = _directory_identity(grant['path'])
+            self._structure_owner(spec, grant, relative, spec.get('_grant_identity'))
             if selection.get('page'):
                 with self._db() as db:
                     saved = self._get(db, grant, 'page', selection['page'])
@@ -341,6 +398,7 @@ class SourceCatalog:
         grant_identity = _directory_identity(grant['path']) if grant['kind'] == 'directory' else None
         if grant_identity is not None:
             spec['_grant_root'], spec['_grant_identity'] = grant['path'], grant_identity
+        self._structure_owner(spec, grant, relative, grant_identity)
         try:
             with self._db() as db, _open_source(spec) as stream:
                 # Complete continuation atomically: retries reuse the same page
@@ -355,19 +413,29 @@ class SourceCatalog:
                     spec['_catalog_page'] = completed['descriptor']
                     if grant_identity is not None:
                         spec['_grant_root'], spec['_grant_identity'] = grant['path'], grant_identity
-                    material = materialized_page(spec)
+                    material = materialized_page(spec, db=db)
                     self._put(db, grant, 'page', completed['page_body'])
                     return {**material, 'selection': completed['selection'], 'next_cursor': completed['next_cursor']}
                 offset = prior['offset'] if prior else 0
                 state = prior['state'] if prior else {}
                 line_number = prior['line'] if prior else 0
                 pass_id = prior['pass_id'] if prior else secrets.token_hex(24)
+                structure_bytes = 0
+                framing_verification_bytes = 0
+                pi_reference = None
+                if spec['format'] == 'pi':
+                    metadata, pi_reference, structure_bytes = _resolve_pi_structure(
+                        spec, stream, epoch[2], reference=state.get('pi_metadata') if 'cache_key' in state.get('pi_metadata', {}) else None, db=db)
+                    state['pi_metadata'] = metadata
                 state_before = deepcopy(state)
+                if pi_reference is not None:
+                    state_before['pi_metadata'] = pi_reference
                 line_before = line_number
                 stream.seek(offset)
                 end = min(epoch[2], offset + max_bytes)
-                events, gaps, excluded = [], [], 0
+                events, gaps, excluded = [], deepcopy(state.get('pi_metadata', {}).get('gaps', [])), 0
                 digest = hashlib.sha256()
+                scanned = offset
                 if spec['format'] == 'document':
                     data = stream.read(end-offset); digest.update(data)
                     text = data.decode('utf-8', errors='replace')
@@ -379,27 +447,30 @@ class SourceCatalog:
                 else:
                     while stream.tell() < end and len(events) < max_events:
                         start = stream.tell()
-                        data = stream.readline(min(MAX_LINE+1, end-start))
-                        if not data.endswith(b'\n') and len(data) <= MAX_LINE and not state.get('draining'):
-                            if stream.tell() == epoch[2]:
-                                digest.update(data); gaps.append({'reason': 'partial_line', 'line': line_number+1})
-                            else:
-                                stream.seek(start)
-                            break
-                        digest.update(data)
-                        if len(data) > MAX_LINE or state.get('draining'):
-                            if not state.get('draining'):
-                                line_number += 1
-                            state['draining'] = not data.endswith(b'\n')
-                            gaps.append({'reason': 'oversized_event', 'line': line_number})
+                        continuing = bool(state.get('draining'))
+                        data, framing_gap, read_bytes = _native_line(stream, end, state)
+                        scanned = max(scanned, start + read_bytes)
+                        if framing_gap:
+                            gap = {'reason': framing_gap, 'line': line_number + 1}
+                            if framing_gap == 'event_exceeds_remaining_budget':
+                                gap.update(next_offset=start, required_bytes_at_least=read_bytes + 1, supported_event_bytes=MAX_NATIVE_EVENT)
+                            gaps.append(gap)
+                            if stream.tell() == start:
+                                break
+                            left = stream.tell() - start
+                            framing_verification_bytes += left
+                            # Rehash only drained bytes, without retaining rejected payloads.
+                            stream.seek(start)
+                            while left:
+                                part = stream.read(min(MAX_LINE, left))
+                                digest.update(part)
+                                left -= len(part)
+                            line_number += not continuing
                             continue
+                        digest.update(data)
                         line_number += 1
                         raw_digest = hashlib.sha256(data).hexdigest()
-                        try:
-                            raw = json.loads(data)
-                            event, gap = _public(spec, raw, line_number, state, raw_digest=raw_digest)
-                        except (ValueError, TypeError, KeyError, AttributeError):
-                            event, gap = None, 'malformed_event'
+                        event, gap = _native_public(spec, data, line_number, state)
                         if gap:
                             gaps.append({'reason': gap, 'line': line_number})
                         if not event:
@@ -419,6 +490,8 @@ class SourceCatalog:
                 if _epoch(os.fstat(stream.fileno())) != epoch or (grant_identity is not None and _directory_identity(grant['path']) != grant_identity):
                     _fail('source_changed', 'Source changed during public page read')
                 events, excluded = _branches(spec, events, gaps, state, excluded)
+                if pi_reference is not None:
+                    state['pi_metadata'] = pi_reference
                 # Conflicts remain a page-local rejection; never trust cross-page branch ancestry.
                 state.pop('conflicting_ids', None)
                 version = {'epoch': epoch, 'identity': epoch[:2], 'cutoff': epoch[2], 'start': offset,
@@ -427,12 +500,14 @@ class SourceCatalog:
                     version['native_version'] = state.get('native_version')
                 if position < epoch[2]:
                     gaps.append({'reason': 'bounded_partial', 'next_offset': position})
-                coverage = {'discovered_bytes': epoch[2], 'read_bytes': position-offset, 'verification_bytes': 0,
+                coverage = {'discovered_bytes': epoch[2], 'read_bytes': max(scanned, position)-offset, 'verification_bytes': structure_bytes + framing_verification_bytes, 'structure_bytes': structure_bytes,
                     'events': len(events), 'excluded': excluded, 'complete': position==epoch[2] and not gaps, 'gaps': gaps}
                 descriptor = {'version': version, 'state_before': state_before, 'line_before': line_before,
-                    'admitted': [e.get('byte_start', offset) for e in events], 'coverage': coverage}
+                    'admitted': [e.get('byte_start', offset) for e in events],
+                    # Reconstruction reuses metadata; its page identity must not depend on cache I/O.
+                    'coverage': {**coverage, 'verification_bytes': 0, 'structure_bytes': 0}}
                 if spec['format'] == 'pi':
-                    descriptor['ancestry_revision'] = 1
+                    descriptor['ancestry_revision'] = 2
                 material = {'source_id': spec['id'], 'events': _decorate(spec, events, version),
                     'version': version, 'coverage': coverage, 'cursor': None}
                 body = {'relative': relative, 'leaf_id': spec.get('leaf_id'), 'grant_identity': grant_identity, 'descriptor': descriptor}

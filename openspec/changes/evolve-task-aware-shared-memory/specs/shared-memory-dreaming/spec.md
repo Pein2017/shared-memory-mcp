@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Bounded trusted run
-The system SHALL bind each Run to stable project/source configuration, an Agent-selected authorized target and source subset, a frozen review objective, real executor, explicit source/provider budgets and one current Attempt. Objective selection SHALL reuse existing checkpoint/lane protection and MUST NOT create a concurrent replacement for unresolved work. Model input MUST NOT expand authority. Harness and model labels MUST NOT confer privileges or determine who can perform Dreaming.
+The system SHALL bind each Run to stable project/source configuration, an Agent-selected authorized target and source subset, a frozen review objective, real executor, explicit invocation/source bounds and one current Attempt. Objective selection SHALL reuse existing checkpoint/lane protection and MUST NOT create a concurrent replacement for unresolved work. Model input MUST NOT expand authority. Harness and model labels MUST NOT confer privileges or determine who can perform Dreaming. The model-free core SHALL NOT gate continuation by cumulative elapsed time, draft count, repair count or read bytes. Per-transaction verification, payload, operation/object bounds and all source/access/recovery fences SHALL remain enforced. Pi structural scanning SHALL have a separate explicit 128 MiB ceiling with reported I/O, in addition to the 8 MiB event and 16,384 graph-identity bounds; graph capacity SHALL be independent of the 1,024-event page bound and payload page caps SHALL NOT be described as bounding the first full structural scan.
 
 #### Scenario: Stale or impersonated continuation
 - **WHEN** a request carries an old generation or a different bound executor
@@ -14,6 +14,10 @@ The system SHALL bind each Run to stable project/source configuration, an Agent-
 #### Scenario: Permission does not follow a harness label
 - **WHEN** the same request is made with a different harness label but without the required grant
 - **THEN** it remains denied, and no caller-controlled identity, profile or publisher field can enlarge the configured authority.
+
+#### Scenario: Valid review continues beyond historical cumulative settings
+- **WHEN** a bound open Run has exceeded the old elapsed, draft, repair or accumulated read setting but has no unresolved replacement-blocking effect
+- **THEN** a new individually bounded operation can continue under the same current caller, generation, source/access and replay checks without treating the old cumulative settings as gates
 
 ### Requirement: General Agent-operated consolidation
 The system SHALL expose authorized discovery, complete retained-memory audit, batch selection and Run lifecycle through the same harness-neutral CLI/MCP integration as ordinary memory. Retained fixed-Run CLI delegation SHALL preserve its scope but MUST NOT require another installed MCP registration. Ordinary memory CRUD SHALL retain its caller-scoped behavior and become available for authorized collaboration/history maintenance without a DreamRun.

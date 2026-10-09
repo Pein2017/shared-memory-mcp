@@ -20,7 +20,11 @@ FORMATS = {'document': 'document-v1', 'codex': 'codex-rollout-v1',
            'pi': 'pi-session-v3', 'claude': 'claude-jsonl-v1'}
 MAX_BYTES = 8 * 1024 * 1024
 MAX_LINE = 64 * 1024
+MAX_NATIVE_EVENT = MAX_BYTES
+MAX_PI_STRUCTURE_BYTES = 128 * 1024 * 1024
 MAX_EVENTS = 1024
+MAX_PI_GRAPH_NODES = 16384
+PI_STRUCTURE_REVISION = 2
 SECRET = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b')
 
 
@@ -123,10 +127,87 @@ def _text(content):
                      and isinstance(x.get('text'), str))
 
 
+def _native_line(stream, end, state):
+    """Frame a complete bounded event; a page boundary never discards its prefix."""
+    start = stream.tell()
+    data = stream.readline(min(MAX_NATIVE_EVENT + 1, end - start))
+    if len(data) > MAX_NATIVE_EVENT or state.get('draining'):
+        while data and not data.endswith(b'\n') and stream.tell() < end:
+            data = stream.readline(min(MAX_LINE, end - stream.tell()))
+        state['draining'] = bool(data and not data.endswith(b'\n'))
+        return None, 'oversized_event', stream.tell() - start
+    if not data.endswith(b'\n'):
+        scanned = stream.tell() - start
+        stream.seek(start)
+        return None, 'partial_line' if end == os.fstat(stream.fileno()).st_size else 'event_exceeds_remaining_budget', scanned
+    return data, None, len(data)
+
+
+def _native_public(source, data, line, state):
+    """All readers use the same strict JSON decoder and public filtering."""
+    raw_digest = hashlib.sha256(data).hexdigest()
+    try:
+        raw = _decode(data.decode('utf-8'))
+        if not isinstance(raw, dict):
+            raise ValueError('Not an event object')
+        event, gap = _public(source, raw, line, state, raw_digest=raw_digest)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        event, gap = None, 'malformed_event'
+    if event is not None:
+        event.update(raw_digest=raw_digest, locator=f'line:{line}')
+    return event, gap
+
+
+def _source_epoch(st):
+    return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
+
+
+def _scan_pi_structure(source, stream, cutoff):
+    """Rebuild edges and saved resume selection without retaining any payload."""
+    if cutoff > MAX_PI_STRUCTURE_BYTES:
+        _fail('source_limit', f'Pi structural scan requires {cutoff} bytes; fixed limit is {MAX_PI_STRUCTURE_BYTES} bytes')
+    original = stream.tell()
+    epoch = _source_epoch(os.fstat(stream.fileno()))
+    stream.seek(0)
+    state, gaps, line = {}, [], 0
+    saved_leaf = None
+    while stream.tell() < cutoff:
+        start = stream.tell()
+        continuing = bool(state.get('draining'))
+        data, framing_gap, scanned = _native_line(stream, cutoff, state)
+        line += not continuing
+        if framing_gap:
+            gaps.append({'reason': framing_gap, 'line': line})
+            if stream.tell() == start:
+                break
+            saved_leaf = None
+            continue
+        try:
+            raw = _decode(data.decode('utf-8'))
+            if not isinstance(raw, dict):
+                raise ValueError('Not an event object')
+            _, gap = _public(source, raw, line, state, raw_digest=hashlib.sha256(data).hexdigest())
+            if raw.get('type') != 'session':
+                saved_leaf = raw.get('id')
+        except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+            gap, saved_leaf = 'malformed_event', None
+        if gap:
+            gaps.append({'reason': gap, 'line': line})
+    metadata = {'parents': state.get('pi_structure', {}), 'valid': bool(state.get('valid')),
+                'leaf': saved_leaf, 'gaps': gaps, 'cutoff': cutoff, 'projection_revision': PI_STRUCTURE_REVISION,
+                'epoch': epoch}
+    metadata['sha256'] = _digest(metadata)
+    if _source_epoch(os.fstat(stream.fileno())) != epoch:
+        _fail('source_changed', 'Pi structure changed during scan')
+    stream.seek(original)
+    return metadata
+
+
 def _pi_structure(raw, state, raw_digest):
     """Keep ancestry metadata for private entries, never their payloads."""
     kind, identifier, parent = raw.get('type'), raw.get('id'), raw.get('parentId')
-    recognized = kind in {'message', 'model_change', 'thinking_level_change', 'label', 'custom', 'session_info'}
+    recognized = kind in {'message', 'model_change', 'thinking_level_change', 'label', 'custom', 'session_info',
+                          'custom_message', 'usage', 'context_edit', 'compaction', 'branch_summary'}
     if kind == 'message':
         recognized = isinstance(raw.get('message'), dict) and raw['message'].get('role') in {'user', 'assistant', 'toolResult', 'system'}
     valid = (isinstance(identifier, str) and 0 < len(identifier) <= 256 and 'parentId' in raw and
@@ -139,8 +220,8 @@ def _pi_structure(raw, state, raw_digest):
         parents[identifier]['recognized'] = False
         return 'conflicting_event_identity'
     if identifier not in parents:
-        if len(parents) >= MAX_EVENTS:
-            _fail('source_limit', 'Pi structural identity window exhausted; select a bounded history')
+        if len(parents) >= MAX_PI_GRAPH_NODES:
+            _fail('source_limit', f'Pi structural graph exceeds fixed limit of {MAX_PI_GRAPH_NODES} identities')
         parents[identifier] = node
     if not valid:
         return 'compaction_originals_not_proven' if kind in {'compaction', 'branch_summary'} else 'missing_parent_identity'
@@ -213,12 +294,13 @@ def _public(source, raw, line, state, *, raw_digest=None):
             return None, None
         if not state.get('valid'):
             return None, 'missing_or_unknown_header'
-        structural_gap = _pi_structure(raw, state, raw_digest or _digest(raw))
+        structural_gap = None if state.get('pi_metadata') else _pi_structure(raw, state, raw_digest or _digest(raw))
         if structural_gap:
             return None, structural_gap
         if kind in {'compaction', 'branch_summary'}:
             return None, 'compaction_originals_not_proven'
-        if kind in {'model_change', 'thinking_level_change', 'label', 'custom', 'session_info'}:
+        if kind in {'model_change', 'thinking_level_change', 'label', 'custom', 'session_info',
+                    'custom_message', 'usage', 'context_edit'}:
             return None, None
         if kind != 'message' or not isinstance(raw.get('message'), dict):
             return None, 'unknown_event_schema'
@@ -281,6 +363,8 @@ def check_snapshot(source, version):
     try:
         with _open_source(source) as stream:
             st = os.fstat(stream.fileno())
+            if source['format'] == 'pi' and version.get('structure_epoch') != _source_epoch(st):
+                return 'stale'
             if [st.st_dev, st.st_ino] != version['identity']:
                 return 'unverifiable'
             if source['format'] == 'document' and st.st_size != version['cutoff']:
@@ -305,7 +389,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
 
     A replaced file or edited consumed prefix invalidates the cursor. Appends do
     not extend the original cutoff. A new Run is required to observe that suffix.
-    Large lines are drained in bounded chunks, never allocated before truncation.
+    Native events are parsed up to 8MiB, independently of the delivery window.
     """
     if source.get('_catalog_page'):
         from .dream_catalog import materialized_page
@@ -342,6 +426,25 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                 _fail('source_changed', 'Consumed source prefix changed; locator is invalid')
             if refresh_cutoff and cursor and (offset == cutoff or cursor.get('pending_tail')):
                 cutoff = st.st_size
+            structure_bytes = 0
+            framing_verification_bytes = 0
+            pi_reference = None
+            if source['format'] == 'pi':
+                metadata = state.get('pi_metadata')
+                if metadata and metadata.get('projection_revision') != PI_STRUCTURE_REVISION:
+                    _fail('unsupported_structure_revision', 'Frozen Pi structural projection revision is unsupported; select a fresh source page')
+                if source.get('_structure_cache'):
+                    from .dream_catalog import _resolve_pi_structure
+                    metadata, pi_reference, structure_bytes = _resolve_pi_structure(
+                        source, stream, cutoff, reference=metadata if metadata and 'cache_key' in metadata else None)
+                else:
+                    if metadata and metadata['epoch'] != _source_epoch(st):
+                        _fail('source_changed', 'Pi structural snapshot changed')
+                    if not metadata or metadata['cutoff'] != cutoff:
+                        metadata = _scan_pi_structure(source, stream, cutoff)
+                        structure_bytes = cutoff
+                state['pi_metadata'] = metadata
+                gaps.extend(deepcopy(metadata['gaps']))
             scanned = offset
             pending_tail = False
             end = min(cutoff, offset + max_bytes, MAX_BYTES)
@@ -364,44 +467,31 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
             else:
                 while stream.tell() < end and len(events) < max_events:
                     start = stream.tell()
-                    before_digest = digest.copy()
-                    data = stream.readline(min(MAX_LINE + 1, end - start))
-                    scanned = max(scanned, stream.tell())
+                    continuing = bool(state.get('draining'))
+                    data, framing_gap, read_bytes = _native_line(stream, end, state)
+                    scanned = max(scanned, start + read_bytes)
+                    if framing_gap:
+                        gap = {'reason': framing_gap, 'line': line + 1}
+                        if framing_gap == 'event_exceeds_remaining_budget':
+                            gap.update(next_offset=start, required_bytes_at_least=read_bytes + 1, supported_event_bytes=MAX_NATIVE_EVENT)
+                        gaps.append(gap)
+                        if stream.tell() == start:
+                            pending_tail = framing_gap == 'partial_line'
+                            break
+                        # A rejected event is drained without storing its payload.
+                        stream.seek(start)
+                        left = scanned - start
+                        framing_verification_bytes += left
+                        while left:
+                            part = stream.read(min(MAX_LINE, left))
+                            digest.update(part)
+                            left -= len(part)
+                        line += not continuing
+                        continue
                     digest.update(data)
                     line += 1
-                    if len(data) > MAX_LINE:
-                        while data and not data.endswith(b'\n') and stream.tell() < end:
-                            data = stream.readline(min(MAX_LINE, end - stream.tell()))
-                            digest.update(data)
-                        gaps.append({'reason': 'oversized_event', 'line': line})
-                        if data and not data.endswith(b'\n'):
-                            state['draining'] = True
-                        continue
-                    if state.pop('draining', False):
-                        while data and not data.endswith(b'\n') and stream.tell() < end:
-                            data = stream.readline(min(MAX_LINE, end - stream.tell()))
-                            digest.update(data)
-                        if data and not data.endswith(b'\n'):
-                            state['draining'] = True
-                        gaps.append({'reason': 'oversized_event_continuation', 'line': line})
-                        continue
-                    if not data.endswith(b'\n'):
-                        pending_tail = stream.tell() == cutoff
-                        gaps.append({'reason': 'partial_line' if pending_tail else 'event_exceeds_remaining_budget', 'line': line})
-                        # A bounded read boundary is not permission to discard half
-                        # an event. Retry its exact beginning in the next batch.
-                        stream.seek(start)
-                        digest = before_digest
-                        line -= 1
-                        break
                     raw_digest = hashlib.sha256(data).hexdigest()
-                    try:
-                        raw = _decode(data.decode('utf-8'))
-                        if not isinstance(raw, dict):
-                            raise ValueError('Not an event object')
-                        event, gap = _public(source, raw, line, state, raw_digest=raw_digest)
-                    except (ValueError, TypeError, KeyError, AttributeError):
-                        event, gap = None, 'malformed_event'
+                    event, gap = _native_public(source, data, line, state)
                     if gap:
                         gaps.append({'reason': gap, 'line': line})
                     if event:
@@ -431,6 +521,8 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                     _fail('source_changed', 'Source changed during read')
                 verify.update(part)
                 left -= len(part)
+            if (source['format'] == 'pi' and _source_epoch(os.fstat(stream.fileno())) != state['pi_metadata']['epoch']):
+                _fail('source_changed', 'Pi structural snapshot changed during read')
             if verify.digest() != digest.digest() or os.fstat(stream.fileno()).st_ino != st.st_ino:
                 _fail('source_changed', 'Source changed during read')
     except OSError as exc:
@@ -441,6 +533,9 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     events, excluded = _branches(source, events, gaps, state, excluded)
     version = {'identity': identity, 'cutoff': cutoff, 'consumed': position,
                'prefix_sha256': digest.hexdigest(), 'schema': source['schema']}
+    if source['format'] == 'pi':
+        version['structure_epoch'] = state['pi_metadata']['epoch']
+        version['structure_sha256'] = state['pi_metadata']['sha256']
     if source['format'] == 'codex':
         version['native_version'] = state.get('native_version')
     for event in events:
@@ -452,32 +547,39 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                      attribution_basis=attestation['basis'] if human else None,
                      evidence='derivative' if source.get('derived') else 'owner' if event['role'] == 'owner' else 'public-message',
                      lineage=source.get('lineage', []))
+    cursor_state = deepcopy(state)
+    if pi_reference is not None:
+        cursor_state['pi_metadata'] = pi_reference
     return {'source_id': source['id'], 'events': events, 'version': version,
             'coverage': {'discovered_bytes': cutoff, 'read_bytes': scanned - offset,
-                         'verification_bytes': offset + position, 'events': len(events),
+                         'verification_bytes': offset + position + structure_bytes + framing_verification_bytes, 'structure_bytes': structure_bytes, 'events': len(events),
                          'excluded': excluded, 'complete': complete and not gaps, 'gaps': gaps},
             'cursor': {'offset': position, 'cutoff': cutoff, 'identity': identity,
-                       'prefix_sha256': digest.hexdigest(), 'line': line, 'state': state, 'seen': seen,
+                       'prefix_sha256': digest.hexdigest(), 'line': line, 'state': cursor_state, 'seen': seen,
                        'pending_tail': pending_tail}}
 
 
 def _branches(source, events, gaps, state, excluded):
     if source['format'] == 'pi':
-        parents = state.get('pi_structure', {})
-        leaf = source.get('leaf_id')
+        metadata = state.get('pi_metadata', {})
+        parents = metadata.get('parents', state.get('pi_structure', {}))
+        leaf = source.get('leaf_id', metadata.get('leaf'))
         if leaf:
             selected, current = set(), leaf
             while (isinstance(current, str) and current in parents and current not in selected and
-                   parents[current]['recognized'] and state.get('valid')):
+                   parents[current]['recognized'] and metadata.get('valid', state.get('valid'))):
                 selected.add(current)
                 current = parents[current]['parent']
             if current is not None:
                 gaps.append({'reason': 'branch_ancestry_not_in_window'})
                 selected.clear()
             excluded += sum(x['event_id'] not in selected for x in events)
-            events = [{**x, 'branch': leaf, 'ancestry_verified': True} for x in events if x['event_id'] in selected]
+            events = [{**x, 'branch': leaf, 'branch_selection': 'explicit' if source.get('leaf_id') else 'saved-resume',
+                       'ancestry_verified': True} for x in events if x['event_id'] in selected]
         else:
-            gaps.append({'reason': 'active_branch_unverified'})
+            gaps.append({'reason': 'saved_branch_unverified'})
+            excluded += len(events)
+            events = []
     elif source['format'] == 'claude':
         leaf = source.get('leaf_id')
         if leaf:

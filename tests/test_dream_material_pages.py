@@ -148,6 +148,78 @@ def test_history_append_does_not_change_the_frozen_event(tmp_path):
     assert result['page']['next_cursor'] is None
 
 
+def test_direct_pi_parts_reuse_frozen_structure_and_reject_changed_epoch(tmp_path, monkeypatch):
+    import shared_memory_mcp.dream_sources as sources
+    from test_dream_source_regressions import selected_engine
+    engine, store, caller, _, policy, _, path = environment(tmp_path)
+    text = 'Synthetic selected Pi report. 飞机\n' * 210
+    entries = [{'type': 'session', 'id': 'fixture-pi', 'version': 3},
+               {'type': 'message', 'id': 'A', 'parentId': None,
+                'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': text}]}}]
+    path.write_text(''.join(json.dumps(e) + '\n' for e in entries))
+    engine = selected_engine(store, caller, policy,
+                             {'id': 'pi', 'path': str(path), 'format': 'pi', 'schema': 'pi-session-v3'})
+    run = engine.start(sources=[{'grant_id': 'pi', 'leaf_id': 'A'}])
+    event = engine.materials(run['run_id'], 'pi')['sources']['pi']['events'][0]
+    def no_rescan(*args, **kwargs):
+        pytest.fail('Frozen Pi structure was scanned again for a text part')
+    monkeypatch.setattr(sources, '_scan_pi_structure', no_rescan)
+    cursor, parts = None, []
+    while True:
+        result = engine.materials(run['run_id'], 'pi', event_key=event['key'], cursor=cursor, max_chars=1000)
+        parts.append(result['sources']['pi']['events'][0]['text'])
+        cursor = result['page']['next_cursor']
+        if cursor is None:
+            break
+    assert ''.join(parts) == text
+    with path.open('a') as stream:
+        stream.write(json.dumps({'type': 'session_info', 'id': 'B', 'parentId': 'A', 'name': 'Synthetic append'}) + '\n')
+    with pytest.raises(MemoryError) as error:
+        engine.materials(run['run_id'], 'pi', event_key=event['key'], max_chars=1000)
+    assert error.value.code == 'source_changed'
+
+
+@pytest.mark.parametrize('catalog', [False, True])
+def test_pi_body_reports_cache_eviction_rebuild_io(tmp_path, monkeypatch, catalog):
+    import shared_memory_mcp.dream_sources as sources
+    import shared_memory_mcp.dream_catalog as catalog_module
+    from test_dream_source_regressions import selected_engine
+    from test_dream_pi_ancestry import pi_values
+    engine, store, caller, _, policy, _, path = environment(tmp_path)
+    path.write_text(''.join(json.dumps(e) + '\n' for e in pi_values('private')))
+    engine = selected_engine(store, caller, policy,
+                             {'id': 'pi', 'path': str(path), 'format': 'pi', 'schema': 'pi-session-v3'})
+    selection = {'grant_id': 'pi', 'leaf_id': 'C'}
+    if catalog:
+        selection = engine.source_read(selection)['selection']
+    run = engine.start(sources=[selection])
+    event = engine.materials(run['run_id'], 'pi')['sources']['pi']['events'][-1]
+    with engine._catalog()._db() as db:
+        db.execute('DELETE FROM structures')
+    original, consumed = sources._open_source, []
+    class Measured:
+        def __init__(self, stream):
+            self.stream = stream
+        def __getattr__(self, key):
+            return getattr(self.stream, key)
+        def read(self, *args):
+            data = self.stream.read(*args); consumed.append(len(data)); return data
+        def readline(self, *args):
+            data = self.stream.readline(*args); consumed.append(len(data)); return data
+    @contextmanager
+    def measured(spec):
+        with original(spec) as stream:
+            yield Measured(stream)
+    monkeypatch.setattr(sources, '_open_source', measured)
+    monkeypatch.setattr(catalog_module, '_open_source', measured)
+    result = engine.materials(run['run_id'], 'pi', event_key=event['key'])
+    assert sum(consumed) == result['page']['read_bytes'] + result['page']['verification_bytes']
+    consumed.clear()
+    repeated = engine.materials(run['run_id'], 'pi', event_key=event['key'])
+    assert sum(consumed) == repeated['page']['read_bytes'] + repeated['page']['verification_bytes']
+    assert result['page']['verification_bytes'] - repeated['page']['verification_bytes'] == path.stat().st_size
+
+
 @pytest.mark.parametrize('mode', ['fixed', 'general', 'gateway'])
 def test_stdio_continues_without_expanding_source_grants(tmp_path, mode):
     from mcp import ClientSession, StdioServerParameters
@@ -179,3 +251,57 @@ def test_stdio_continues_without_expanding_source_grants(tmp_path, mode):
                     arguments['cursor'] = cursor
                 return ''.join(parts)
     assert asyncio.run(read_all()) == text
+
+
+@pytest.mark.parametrize('harness', ['codex', 'pi'])
+@pytest.mark.parametrize('catalog', [False, True])
+def test_large_native_event_body_pages_keep_identity_and_current_fences(tmp_path, harness, catalog, monkeypatch):
+    from pathlib import Path
+    from shared_memory_mcp.dream_sources import FORMATS
+    from test_dream_sources import HEADER, codex_message, line
+    engine, store, caller, _, policy, _, native = environment(tmp_path)
+    text = 'Synthetic public body. 飞机🛫\n' * 2200 + 'TAIL: unchanged limits.'
+    event = codex_message(text, role='assistant') if harness == 'codex' else {
+        'type': 'message', 'id': 'saved', 'parentId': None,
+        'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': text}]}}
+    native.write_bytes(line(HEADER if harness == 'codex' else {'type': 'session', 'id': 'fixture-pi', 'version': 3}) + line(event))
+    assert len(line(event)) > 65536
+    updated = deepcopy(policy)
+    updated['profiles']['fixture']['budgets']['source_bytes'] = 2 * 1024 * 1024
+    grant = updated['profiles']['fixture']['source_grants'][1]
+    grant.update(format=harness, schema=FORMATS[harness], attestations={})
+    configure_policy(store, updated, expected_revision=_digest(policy))
+    selection = engine.source_read({'grant_id': 'human'})['selection'] if catalog else {'grant_id': 'human'}
+    run = engine.start(sources=[selection])
+    frozen = engine.materials(run['run_id'], 'human')['sources']['human']['events'][0]
+    saved = Path(store.root / 'dreaming/runs' / run['run_id'] / 'run.json').read_bytes()
+    if harness == 'pi':
+        import shared_memory_mcp.dream_sources as readers
+        def no_rescan(*args, **kwargs):
+            raise AssertionError('Body chunk rescanned full Pi structural ancestry')
+        monkeypatch.setattr(readers, '_scan_pi_structure', no_rescan)
+    cursor, chunks = None, []
+    while True:
+        result = engine.materials(run['run_id'], 'human', event_key=frozen['key'], cursor=cursor, max_chars=16000)
+        part = result['sources']['human']['events'][0]
+        assert {k: v for k, v in part.items() if k != 'text'} == {k: v for k, v in frozen.items() if k != 'text'}
+        assert result['sources']['human']['coverage']['complete'] is False
+        chunks.append(part['text'])
+        cursor = result['page']['next_cursor']
+        if cursor is None:
+            break
+    assert ''.join(chunks) == text
+    assert len(chunks) > 1
+    assert Path(store.root / 'dreaming/runs' / run['run_id'] / 'run.json').read_bytes() == saved
+    first = engine.materials(run['run_id'], 'human', event_key=frozen['key'], max_chars=1000)
+    # The continuation is fenced even when event and file lengths are unchanged.
+    native.write_bytes(native.read_bytes().replace(b'unchanged limits', b'untrusted limits'))
+    with pytest.raises(MemoryError) as error:
+        engine.materials(run['run_id'], 'human', event_key=frozen['key'], cursor=first['page']['next_cursor'])
+    assert error.value.code == 'source_changed'
+    revoked = deepcopy(updated)
+    revoked['profiles']['fixture']['source_grants'] = revoked['profiles']['fixture']['source_grants'][:1]
+    configure_policy(store, revoked, expected_revision=_digest(updated))
+    with pytest.raises(MemoryError) as error:
+        engine.materials(run['run_id'], 'human', event_key=frozen['key'], cursor=first['page']['next_cursor'])
+    assert error.value.code == 'dream_access_denied'

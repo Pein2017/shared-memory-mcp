@@ -6,12 +6,13 @@ from shared_memory_mcp.context_packet import exposure_size
 from dreaming_helpers import environment
 
 
-def capture(store, caller, owner, key, text, role='background', modes=None, relations=None, replaces=None):
+def capture(store, caller, owner, key, text, role='background', modes=None, relations=None, replaces=None, compact=None):
     rec = {'kind': 'observation', 'title': key, 'body': text, 'scope': 'project', 'sources': [{'uri': owner.as_uri()}]}
     details = {'conditions': 'Frozen fixture conditions; not transfer evidence.', 'extensions': {'narrative': {'id': key, 'role': role}}}
     if modes: details['task_modes'] = modes
     if relations: details['relations'] = relations
     if replaces: details['extensions']['narrative']['replaces'] = replaces
+    if compact: details['extensions']['narrative']['compact'] = compact
     return store.capture(caller, rec, key, {'reason': 'Fixture semantic/source review', 'evidence': rec['sources']}, details)
 
 
@@ -38,6 +39,7 @@ def test_cross_mode_evidence_remains_and_preferences_are_strict(tmp_path):
 def test_stable_bootstrap_and_single_combined_budget(tmp_path):
     _, store, _, caller, _, owner, _ = environment(tmp_path)
     capture(store, caller, owner, 'goal', 'Long-term goal: unique physical owner coverage.', 'goal')
+    capture(store, caller, owner, 'airport-milestone', 'Airport milestone: finite-panel fit only.', 'milestone')
     capture(store, caller, owner, 'airport', 'Airport results are conditional; preservation failed.', 'branch', ['research'])
     first = store.context(caller)
     bound = store.context(caller, 'airport', task_mode='research')
@@ -58,6 +60,56 @@ def test_whole_background_that_fits_combined_budget_is_delivered(tmp_path):
     assert packet['status'] == 'ok' and body in packet['text']
     assert 'not transfer evidence' in packet['text']
     assert exposure_size(packet) <= 8000
+
+
+def test_query_evidence_precedes_large_background_with_exact_continuation(tmp_path):
+    _, store, _, caller, _, owner, _ = environment(tmp_path)
+    body = 'Dated finite-panel outcome; no transfer established. ' * 70
+    background = capture(store, caller, owner, 'retained-account', body)
+    target = capture(store, caller, owner, 'designated-successor',
+                     'Supplied coordinates do not establish autonomous discovery. ' * 30,
+                     'outcome', ['research'])
+    startup = store.context(caller)
+    assert body in startup['text']
+    packet = store.context(caller, 'designated-successor', task_mode='research')
+    assert target['id'] in {item['id'] for item in packet['items']}
+    assert background['id'] not in {item['id'] for item in packet['items']}
+    assert packet['continuation'] == {'ids': [background['id']]}
+    assert background['id'] in packet['text'] and 'Deferred/read:' in packet['text']
+    part = next(p for p in packet['parts'] if p['kind'] == 'task')
+    assert background['id'] in packet['text'][part['start']:part['end']]
+    assert 'not transfer evidence' in packet['text'] and exposure_size(packet) <= 8000
+
+
+def test_query_uses_reviewed_compact_background_without_changing_bootstrap(tmp_path):
+    _, store, _, caller, _, owner, _ = environment(tmp_path)
+    background = capture(store, caller, owner, 'retained-account', 'Detailed account. ' * 300,
+                         compact='Reviewed finite-panel account; transfer remains untested.')
+    target = capture(store, caller, owner, 'designated-successor',
+                     'Supplied coordinates do not establish autonomous discovery. ' * 30, 'outcome')
+    startup = store.context(caller)
+    packet = store.context(caller, 'designated-successor', task_mode='research')
+    assert {background['id'], target['id']} <= {item['id'] for item in packet['items']}
+    assert 'Reviewed finite-panel account' in packet['text'] and 'Detailed account.' not in packet['text']
+    def bootstrap(p):
+        part = p['parts'][0]
+        return p['text'][part['start']:part['end']]
+    assert bootstrap(startup) == bootstrap(packet)
+    assert exposure_size(packet) <= 8000
+
+
+def test_query_rank_survives_narrative_role_selection(tmp_path):
+    _, store, _, caller, _, owner, _ = environment(tmp_path)
+    weaker = capture(store, caller, owner, 'historic-control',
+                     'Successor local observation; no transfer established. ' * 70, 'branch')
+    target = capture(store, caller, owner, 'successor-mechanism',
+                     'The next discriminating observation remains missing. ' * 30, 'question')
+    query = 'successor-mechanism'
+    assert store.search(caller, query)['items'][0]['id'] == target['id']
+    packet = store.context(caller, query, task_mode='research')
+    assert target['id'] in {item['id'] for item in packet['items']}
+    assert weaker['id'] not in {item['id'] for item in packet['items']}
+    assert 'not transfer evidence' in packet['text'] and exposure_size(packet) <= 8000
 
 
 @pytest.mark.parametrize('cap', [128, 512, 1800, 3400, 8000])

@@ -22,6 +22,18 @@ Historical review SHALL preserve original event identity, public-message provena
 - **WHEN** ancestry cannot be established for a selected public event
 - **THEN** the event is not published as established user knowledge merely because its displayed role is `user`
 
+#### Scenario: Saved Pi branch has an ancestor outside the payload page
+- **WHEN** offline history review selects the saved resume branch or an explicit leaf
+- **THEN** complete frozen structural ancestry is checked before public admission and reused across payload pages with epoch/grant fences; saved selection is not described as a live in-memory branch
+
+#### Scenario: Preserved original messages cross known private Pi nodes
+- **WHEN** a supported private custom, usage, context-edit or summary entry has valid `id`/`parentId` links in the selected branch
+- **THEN** those edges can establish ancestry for separately persisted original messages while private payloads remain excluded, summaries retain missing-original coverage gaps and human attribution is unchanged; branch-summary `fromId` does not become ancestry and offline review does not claim native model-context replay
+
+#### Scenario: Structural projection changes after an earlier frozen read
+- **WHEN** a retained graph reference belongs to an incompatible structural projection revision
+- **THEN** it is rejected for continuation pending a fresh qualified read, without changing original source/receipt hashes or silently repinning its digest
+
 ### Requirement: Task episodes rather than session-shaped knowledge
 The historical directory SHALL represent coherent task episodes with original source ranges, scope, modes and limitations. Mixed sessions SHALL be splittable by content. Historical accounts MUST remain distinguishable from reusable active knowledge, and directory names MUST NOT become authoritative research/general labels.
 
@@ -57,6 +69,14 @@ The system SHALL support bounded continuation for long source material and disti
 #### Scenario: Long event is fully delivered but only selected claims are reviewed
 - **WHEN** all pages have been read by transport for a narrowly scoped synopsis
 - **THEN** the output can publish those reviewed claims while retaining partial or unprocessed coverage for the remaining historical-review objective
+
+#### Scenario: Native message exceeds the old framing window
+- **WHEN** a qualified native event is larger than 64 KiB but within the supported 8 MiB event bound
+- **THEN** all reader paths decode the complete event and apply public/sensitive-content filtering before body paging; page pieces retain its event ID, digest and locator rather than becoming independent evidence
+
+#### Scenario: Source page ends inside a supported event
+- **WHEN** a page cannot admit the complete native event
+- **THEN** it returns the exact event offset and a truthful required-size lower bound without advancing coverage past that event; a later supported larger page can admit it before bounded body delivery
 
 ### Requirement: Single live work and recoverable partial outcomes
 The system SHALL retain one live invocation for a bound consolidation lane, support explicit identity-preserving continuation and reconcile actual effects after interruption. It MUST retain successful bounded work without claiming unrelated source coverage or restoring the whole store.

@@ -24,6 +24,7 @@ POLICY = 'dreaming/policy.json'
 DISPOSITIONS = 'dreaming/dispositions.json'
 BUDGET_KEYS = {'source_bytes', 'events', 'operations', 'drafts', 'view_chars', 'view_bytes',
                'model_calls', 'input_tokens', 'output_tokens', 'seconds', 'repair_rounds'}
+INVOCATION_BUDGET_KEYS = {'source_bytes', 'events', 'operations', 'view_chars', 'view_bytes'}
 
 
 def _put(store, relative, document, *, immutable=False):
@@ -424,7 +425,8 @@ class Dreaming:
             _put(self.store, active_path, {'run_id': run_id})
             return {'status': 'created', 'run_id': run_id, 'generation': 1, 'coverage': run['coverage'],
                     'model_required': True, 'execution_mode': 'external-publisher' if self.publisher else 'advisory-draft-only',
-                    'provider': profile['provider'], 'transport': profile['transport'], 'budgets': profile['budgets'],
+                    'provider': profile['provider'], 'transport': profile['transport'],
+                    'budgets': {k: v for k, v in profile['budgets'].items() if k in INVOCATION_BUDGET_KEYS},
                     'review_objective': deepcopy(review_objective), 'objective_completion': 'pending',
                     'pending_review': sum(value == 'pending-review' for value in processed.values()),
                     'unresolved_effects': 0, 'source_changes': source_changes}
@@ -480,6 +482,10 @@ class Dreaming:
         initial = None if spec.get('_catalog_page') else {
             'identity': version['identity'], 'cutoff': version['cutoff'],
             'prefix_sha256': hashlib.sha256(b'').hexdigest()}
+        if initial is not None:
+            metadata = output[source_id].get('cursor', {}).get('state', {}).get('pi_metadata')
+            if metadata:
+                initial['state'] = {'pi_metadata': deepcopy(metadata)}
         reconstructed = read_source(spec, max_bytes=version['consumed'], max_events=1024, cursor=initial)
         whole = next((e for e in reconstructed['events'] if e['key'] == event_key), None)
         identity = lambda e: {k: v for k, v in e.items() if k not in {'text', 'excerpt_truncated'}}
@@ -515,7 +521,7 @@ class Dreaming:
                           'text_sha256': text_digest,
                           'next_cursor': 'material-v1:' + _json({'binding': binding, 'text_sha256': text_digest, 'offset': end}) if end < len(text) else None,
                           'read_bytes': page_bytes,
-                          'verification_bytes': (3 if spec.get('_catalog_page') else 2) * page_bytes,
+                          'verification_bytes': (3 if spec.get('_catalog_page') else 2) * page_bytes + reconstructed['coverage'].get('structure_bytes', 0),
                           'notice': 'Text availability only; frozen coverage and semantic review are unchanged.'}
         return result
 
@@ -692,8 +698,8 @@ class Dreaming:
             _fail('draft_limit', 'Operations exceed the selected working-set bound')
         with self.store._gate():
             run = self._run(run_id, generation)
-            if run['phase'] == 'closed' or len(run['drafts']) >= profile['budgets']['drafts']:
-                _fail('draft_limit', 'Run is closed or has exhausted its frozen-draft budget')
+            if run['phase'] == 'closed':
+                _fail('draft_limit', 'Closed Runs cannot accept replacement drafts')
             if run['current_draft']:
                 previous = self._draft(run, run['current_draft'])
                 outstanding = [o for o in previous['operations'] if o['key'] not in run['receipts']]
@@ -704,9 +710,6 @@ class Dreaming:
                         _fail('unresolved_effect', 'A persisted intent must be reconciled before replacing the draft')
             if reconsider_reason is not None:
                 _nonempty(reconsider_reason, 'reconsider_reason')
-            self._check_budget(run)
-            if len(run['drafts']) > profile['budgets']['repair_rounds']:
-                _fail('draft_limit', 'The explicit repair-round budget is exhausted')
             ops = deepcopy(operations)
             ids = [o.get('id') for o in ops if isinstance(o, dict)]
             if len(ids) != len(ops) or any(not isinstance(x, str) or not SAFE_ID.fullmatch(x) for x in ids) or len(set(ids)) != len(ids):
@@ -822,12 +825,6 @@ class Dreaming:
         _put(self.store, path[:-5] + '/' + revision + '.json', intent, immutable=True)
         _put(self.store, path, {'version': 1, 'revision': revision})
 
-    def _check_budget(self, run):
-        from .core import _utc
-        elapsed = (_utc(_now()) - _utc(run['created_at'])).total_seconds()
-        if elapsed > run['profile_snapshot']['budgets']['seconds']:
-            _fail('run_budget_exhausted', 'Run wall-clock budget exhausted; only observation/reconciliation is permitted')
-
     def _source_checks(self, run):
         from .dream_sources import check_snapshot
         _, profile = self._policy()
@@ -836,8 +833,8 @@ class Dreaming:
         with self.store._gate():
             current = self._run(run['id'], run['generation'])
             limit = min(profile['budgets']['source_bytes'], run['profile_snapshot']['budgets']['source_bytes'])
-            if current.get('read_bytes', 0) + cost > limit:
-                _fail('source_budget_exhausted', 'Cumulative source reading and verification exceeded this Run budget')
+            if cost > limit:
+                _fail('source_budget_exhausted', 'Source verification exceeds the per-transaction byte bound')
             current['read_bytes'] = current.get('read_bytes', 0) + cost
             self._save(current)
         return {sid: check_snapshot(specs[sid], material['version']) if sid in specs else 'forbidden'
@@ -951,7 +948,6 @@ class Dreaming:
                     _fail('stale_basis', 'Canonical namespace, policy, registry or disposition changed after review')
                 if draft['basis']['policy'] != _digest(policy):
                     _fail('stale_policy', 'Frozen draft policy is no longer current')
-                self._check_budget(run)
                 if '_failure' in source_checks:
                     _fail(source_checks['_failure'], 'Source revalidation budget unavailable; completed effects remain recoverable')
                 effects = self._effect(run, operation, source_checks)
@@ -1140,7 +1136,6 @@ class Dreaming:
             identity = _digest([run['target'], topic, relation])
             if run['phase'] == 'closed':
                 _fail('closed_run', 'Closed Runs cannot accept new issues')
-            self._check_budget(run)
             relative = f'dreaming/issues/{identity}.json'
             prior = read_json(self.store, relative)
             semantic = _digest(' '.join(note.split()))

@@ -54,7 +54,11 @@ def search(store, context, query='', include_resolved=False, limit=8):
                 continue
             items.append({k: deepcopy(item.get(k)) for k in ('id', 'target', 'topic', 'relation', 'note',
                 'disposition', 'needs_semantic_review', 'observations', 'as_of', 'source_pointers')} |
-                {'revision': _digest(item), 'authority': 'advisory-only'})
+                {'revision': _digest(item), 'authority': 'advisory-only',
+                 'current_actions': sorted(profile['actions']),
+                 **({'observed_actions_changed': sorted(item['observations']['current_actions']) != sorted(profile['actions'])}
+                    if isinstance(item.get('observations', {}).get('current_actions'), list) and
+                       all(isinstance(action, str) for action in item['observations']['current_actions']) else {})})
         result = {'status': 'ok', 'scope': scope, 'items': [], 'omitted': len(items)}
         for item in items[:limit]:
             trial = {**result, 'items': [*result['items'], item], 'omitted': len(items) - len(result['items']) - 1}

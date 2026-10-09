@@ -90,13 +90,14 @@ def test_pi_branches_shared_ancestor_once_and_compaction_gap(tmp_path):
     assert any(g['reason'] == 'compaction_originals_not_proven' for g in result['coverage']['gaps'])
 
 
-def test_pi_active_branch_is_not_inferred_from_last_message(tmp_path):
+def test_pi_saved_branch_is_labeled_without_claiming_live_selection(tmp_path):
     spec = source(tmp_path, 'pi', [{'type': 'session', 'id': 'p', 'version': 3},
                                   {'type': 'message', 'id': 'm', 'parentId': None,
                                    'message': {'role': 'user', 'content': 'Synthetic expression'}}])
     result = read_source(spec)
-    assert not result['coverage']['complete']
-    assert any(g['reason'] == 'active_branch_unverified' for g in result['coverage']['gaps'])
+    assert result['coverage']['complete']
+    assert result['events'][0]['branch'] == 'm'
+    assert result['events'][0]['branch_selection'] == 'saved-resume'
 
 
 def test_claude_sidechain_attribution_and_exact_native_version(tmp_path):
@@ -113,7 +114,7 @@ def test_claude_sidechain_attribution_and_exact_native_version(tmp_path):
 
 @pytest.mark.parametrize('suffix,reason', [(b'{broken}\n', 'malformed_event'),
                                           (b'{"type":"message"', 'partial_line'),
-                                          (b'x' * (MAX_LINE * 3) + b'\n', 'oversized_event'),
+                                          (b'x' * (MAX_LINE * 3) + b'\n', 'malformed_event'),
                                           (line({'type': 'future-schema'}), 'unknown_event_schema')])
 def test_corruption_large_partial_and_unknown_events_are_gaps_not_silence(tmp_path, suffix, reason):
     spec = source(tmp_path, 'codex', [HEADER], native_version='fixture-v1')

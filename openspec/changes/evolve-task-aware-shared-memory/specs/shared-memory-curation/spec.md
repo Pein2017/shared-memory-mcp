@@ -70,3 +70,7 @@ A consuming Agent SHALL judge a proposal under the current task's authority and 
 #### Scenario: Suggested experiment is recalled during a read-only task
 - **WHEN** an Agent encounters an unresolved research suggestion while answering a question
 - **THEN** it can explain or assess the suggestion but does not treat its presence in memory as permission to execute it
+
+#### Scenario: Proposal observed an older action policy
+- **WHEN** current configured actions differ from the proposal's explicit observed action list
+- **THEN** search exposes current actions and the difference without rewriting the observation, changing its content revision or automatically disposing the advisory proposal

@@ -61,6 +61,14 @@ The default active shared-memory payload SHALL target 2,000 model tokens and MUS
 - **WHEN** content contains CJK text, long source identifiers or escaped transport fields
 - **THEN** enforcement uses the delivered UTF-8 representation rather than treating character counts as exact tokens or omitting envelope overhead
 
+#### Scenario: Whole background would exclude the matching task evidence
+- **WHEN** an individually eligible background and ranked query evidence cannot fit together under the normal combined cap
+- **THEN** current-owner checks and ranked task evidence take precedence, related qualifiers remain indivisible, and the omitted unit has an exact continuation inside the delivered packet part; query-empty startup may still deliver the whole background if it fits
+
+#### Scenario: Reviewed compact background fits with the task
+- **WHEN** an existing reviewed compact rendition and the task evidence fit together
+- **THEN** both are delivered with unchanged background position and identity, without core-generated compression
+
 ### Requirement: Dependency-scoped freshness
 The system SHALL retain source-linked project understanding with its review time and source version. Ordinary permitted source updates SHALL mark affected units for checking without erasing the usable as-of account or declaring historical findings false. Remembered current-state claims MUST NOT be presented as freshly verified. Current access, withdrawal, supersession and source-use restrictions SHALL remain enforced independently of freshness, including historical reads.
 

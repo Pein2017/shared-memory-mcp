@@ -302,7 +302,8 @@ def test_workflow_context_preserves_whole_unicode_records(environment):
     assert omitted['status'] == 'budget-limited' and omitted['items'] == []
     assert omitted['omitted'] >= 1 and omitted['truncated']
     assert omitted['continuation']['ids'] == [record['id']]
-    assert body not in omitted['text'] and record['id'] not in omitted['text']
+    assert body not in omitted['text']
+    assert 'Deferred/read:' in omitted['text'] and record['id'] in omitted['text']
     assert len(omitted['text']) <= len(complete['text'])-1
 
 
