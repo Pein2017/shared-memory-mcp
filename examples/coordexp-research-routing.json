@@ -1,0 +1,238 @@
+{
+  "version": 1,
+  "description": "CoordExp research lens. Primary objective: unique physical-owner coverage under empty-history native greedy. Never equate annotation IoU proxies, supplied/forced cues, finite fitting or net improvement with new natural owners, transfer or joint preservation. Technical invalidity leaves scientific questions unanswered. Dated memory is navigation, not current-state verification.",
+  "topics": [
+    {
+      "id": "research-entry",
+      "title": "Current research owners",
+      "when": "Current index and story for research status, closures, separately active branches and explicit authority.",
+      "aliases": [
+        "research status",
+        "current research",
+        "research index",
+        "最新研究"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/index.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        },
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/story.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "capacity-readout",
+      "title": "Capacity and readout",
+      "when": "Distinguish readout capacity, conditional access, optimization and empty-history natural policy.",
+      "aliases": [
+        "capacity",
+        "readout",
+        "capacity fit"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/questions/capacity-and-readout.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "greedy-credit",
+      "title": "Greedy compilation and retained coverage",
+      "when": "Distinguish teacher-forced routes from natural greedy and gains from displaced physical owners; inspect current airport/short-continuation owners.",
+      "aliases": [
+        "airport",
+        "airport progress",
+        "greedy",
+        "preservation",
+        "retention",
+        "credit"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/questions/greedy-compilation.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        },
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/questions/preservation-and-credit.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        },
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-07-airport-successor-composition/results.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        },
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-08-short-continuation-panel/results.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "physical-evaluation",
+      "title": "Physical owner evaluation",
+      "when": "Require physical identity review and distinguish annotation matching from the underlying owner.",
+      "aliases": [
+        "physical owner",
+        "IoU",
+        "annotation",
+        "detection"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/questions/physical-evaluation.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "visual-use",
+      "title": "Visual designation and causal use",
+      "when": "Separate supplied labels/cues, designated instances, causal visual use and natural autonomous selection.",
+      "aliases": [
+        "designation",
+        "visual use",
+        "visual tokens",
+        "binding"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/questions/visual-designation-and-causal-use.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        },
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-08-instance-designation/results.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "test-discovery",
+      "title": "Test discovery and qualification",
+      "when": "Differentiate valid executable qualification and scientific evidence; inspect current engineering sources.",
+      "aliases": [
+        "test discovery",
+        "qualification"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/index.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    },
+    {
+      "id": "harness-runtime",
+      "title": "Harness and runtime owners",
+      "when": "Treat current code/config/worker state as source-owned, not settled by historical memory.",
+      "aliases": [
+        "harness",
+        "runtime",
+        "checkpoint"
+      ],
+      "sources": [
+        {
+          "uri": "file:///data/CoordExp/.worktrees/research-probes/research/index.md",
+          "locator": "Retained owner; inspect the current content and explicit limitations"
+        }
+      ]
+    }
+  ],
+  "context": {
+    "version": 1,
+    "background_ids": [],
+    "owners": [
+      {
+        "id": "research-index",
+        "topic_ids": [
+          "research-entry",
+          "capacity-readout",
+          "greedy-credit",
+          "physical-evaluation",
+          "visual-use",
+          "test-discovery",
+          "harness-runtime"
+        ],
+        "grant_id": "coordexp-research-index",
+        "role": "index"
+      },
+      {
+        "id": "research-story",
+        "topic_ids": [
+          "research-entry"
+        ],
+        "grant_id": "coordexp-research-story",
+        "role": "question"
+      },
+      {
+        "id": "capacity-readout-question",
+        "topic_ids": [
+          "capacity-readout"
+        ],
+        "grant_id": "coordexp-capacity-question",
+        "role": "question"
+      },
+      {
+        "id": "greedy-compilation-question",
+        "topic_ids": [
+          "greedy-credit"
+        ],
+        "grant_id": "coordexp-greedy-question",
+        "role": "question"
+      },
+      {
+        "id": "preservation-question",
+        "topic_ids": [
+          "greedy-credit"
+        ],
+        "grant_id": "coordexp-preservation-question",
+        "role": "question"
+      },
+      {
+        "id": "physical-owner-question",
+        "topic_ids": [
+          "physical-evaluation"
+        ],
+        "grant_id": "coordexp-physical-question",
+        "role": "question"
+      },
+      {
+        "id": "visual-designation-question",
+        "topic_ids": [
+          "visual-use"
+        ],
+        "grant_id": "coordexp-visual-question",
+        "role": "question"
+      },
+      {
+        "id": "airport-composition-result",
+        "priority": 50,
+        "topic_ids": [
+          "greedy-credit"
+        ],
+        "grant_id": "coordexp-airport-result",
+        "role": "result"
+      },
+      {
+        "id": "short-continuation-result",
+        "priority": 90,
+        "topic_ids": [
+          "greedy-credit"
+        ],
+        "grant_id": "coordexp-short-result",
+        "role": "result"
+      },
+      {
+        "id": "instance-designation-result",
+        "priority": 90,
+        "topic_ids": [
+          "visual-use"
+        ],
+        "grant_id": "coordexp-designation-result",
+        "role": "result"
+      }
+    ]
+  }
+}

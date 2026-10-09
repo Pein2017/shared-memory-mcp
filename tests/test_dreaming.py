@@ -23,7 +23,9 @@ def test_real_canonical_vertical_and_withdrawal_invalidation(env):
     record_id = frozen['operations'][0]['reserved_id']
     current = engine.overview('research', scenario='research')
     assert current['status'] == 'valid' and 'Counterevidence:' in current['text']
-    assert store.context(owner_caller)['items'] == []
+    packet = store.context(owner_caller)
+    assert packet['items'] and 'coverage 7' in packet['text']
+    assert 'Counterevidence:' in packet['text']
     record = store.read(owner_caller, [record_id])['items'][0]
     assert record['project_id'] == 'demo' and record['provenance']['cwd'] == caller['cwd']
     original = (store.root / f'records/demo/{record_id}.md').read_bytes()

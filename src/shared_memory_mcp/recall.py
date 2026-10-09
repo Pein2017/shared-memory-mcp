@@ -45,7 +45,12 @@ def load_routing(store, project_id):
     route = read_json(store, Path('routing') / (project_id + '.json'))
     if route is None:
         return {'version': 1, 'description': 'No curated routing configured; search by task terms.', 'topics': []}
-    _keys(route, {'version', 'description', 'topics'}, {'version', 'description', 'topics'}, 'routing')
+    _keys(route, {'version', 'description', 'topics'}, {'version', 'description', 'topics', 'context'}, 'routing')
+    if 'context' in route:
+        configured = route['context']
+        _keys(configured, {'version'}, {'version', 'background_ids', 'views', 'owners'}, 'context routing')
+        if configured['version'] != 1 or any(not RECORD_ID.fullmatch(x) for x in configured.get('background_ids', [])):
+            _fail('invalid_routing', 'Context routing requires version 1 and canonical background IDs')
     if route['version'] != 1 or not isinstance(route['topics'], list) or len(route['topics']) > 64:
         _fail('invalid_routing', 'Unsupported or oversized routing configuration')
     _nonempty(route['description'], 'routing.description')
@@ -69,6 +74,9 @@ def load_routing(store, project_id):
                 _fail('invalid_routing', f'{field} must be a bounded string list')
         if any(not RECORD_ID.fullmatch(x) for x in topic.get('memory_ids', [])):
             _fail('invalid_routing', 'memory_ids must be canonical IDs')
+    if 'context' in route:
+        from .owner_checks import validate_owners
+        validate_owners(route['context'].get('owners', []), route['topics'])
     return route
 
 
@@ -102,7 +110,7 @@ def collect(store, context, include_inactive=False, include_shared=True):
                if usable(r) and (include_inactive or r['effective_status'] == 'active')]
     filtered = len(own) - len(records)
     policy = load_sharing(store)
-    if include_shared:
+    if include_shared and store.collection == 'project':
         for edge in policy['allow']:
             if edge['to'] != scope['project_id']:
                 continue
@@ -200,7 +208,7 @@ def card(r):
                 read_hint={'ids': [r['id']], 'include_inactive': r['effective_status'] != 'active'},
                 match=r.get('match', {}), read_required=not short or len(sources) > 2,
                 preview_only=not short and not bool(d.get('summary')))
-    for key in ('domain', 'statement_type', 'conditions'):
+    for key in ('domain', 'statement_type', 'conditions', 'task_modes'):
         if key in d:
             item[key] = d[key]
     if d.get('summary'):
@@ -225,7 +233,9 @@ def minimal_card(r):
 
 
 def search(store, context, query, limit=20, include_inactive=False, *, domain=None,
-           offset=0, include_shared=True, expected_revision=None):
+           offset=0, include_shared=True, expected_revision=None, task_mode=None, mode_restriction=None):
+    from .context_packet import validate_mode
+    validate_mode(task_mode, mode_restriction)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         _fail('invalid_input', 'limit must be between 1 and 100')
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
@@ -237,7 +247,15 @@ def search(store, context, query, limit=20, include_inactive=False, *, domain=No
         routing = load_routing(store, scope['project_id'])
         routes, expansion = route_matches(routing, query)
         ranked = rank(records, query, expansion, domain)
+        if task_mode:
+            for r in ranked:
+                if task_mode in r.get('details', {}).get('task_modes', []):
+                    r['match']['score'] *= 1.15
+            ranked.sort(key=lambda r: (-r['match']['score'], r['id']))
+        if mode_restriction:
+            ranked = [r for r in ranked if mode_restriction['mode'] in r.get('details', {}).get('task_modes', [])]
         revision = _digest({'scope': scope, 'query': normalized(query), 'domain': domain,
+                            'task_mode': task_mode, 'mode_restriction': mode_restriction,
                             'visibility': [include_inactive, include_shared], 'routing': routing, 'sharing': policy,
                             'records': sorted((r['project_id'], r['id'], r['content_digest'], r['effective_status'], r['curation_revision']) for r in records)})
     if expected_revision is not None and expected_revision != revision:
@@ -306,7 +324,7 @@ def public_projection(tool, result, audit=False):
     if not isinstance(audit, bool):
         _fail('invalid_input', 'audit must be boolean')
     if tool == 'context':
-        return {key: value for key, value in result.items() if key != 'text'}
+        return result if result.get('packet_version') == 1 else {key: value for key, value in result.items() if key != 'text'}
     if tool == 'read' and not audit:
         hidden = {'proposal', 'promotion', 'review', 'curation_audit'}
         return {**result, 'items': [{key: value for key, value in r.items() if key not in hidden}

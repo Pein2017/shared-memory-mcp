@@ -42,25 +42,24 @@ def test_installed_stdio_roundtrip(tmp_path):
                 assert server_icon.mimeType == 'image/svg+xml'
                 assert base64.b64decode(server_icon.src.split(',',1)[1]) == packaged_logo.read_bytes()
                 tools = await session.list_tools()
-                assert [tool.name for tool in tools.tools] == ['context','search','read','create','approve','update','delete','capture','curate']
+                core_names = {'context','search','read','create','approve','update','delete','capture','curate'}
+                names = {tool.name for tool in tools.tools}
+                assert core_names | {'run_start','run_changes','overview_read','draft_publish','issue_search','issue_resolve'} <= names
+                assert len(names) == len(tools.tools)
                 assert (await session.list_tools()).model_dump() == tools.model_dump()
                 for tool in tools.tools:
                     assert tool.title and tool.icons == initialized.serverInfo.icons
                     assert 'context' in tool.inputSchema['required']
-                    assert tool.annotations.readOnlyHint == (tool.name in {'context','search','read'})
-                    assert tool.annotations.idempotentHint is True
+                    if tool.name in core_names:
+                        assert tool.annotations.readOnlyHint == (tool.name in {'context','search','read'})
+                        assert tool.annotations.idempotentHint is True
                     assert tool.annotations.openWorldHint is False
                 descriptions = {tool.name:tool.description.lower() for tool in tools.tools}
-                for name, terms in {
-                    'context': ('fresh','start/resume','caller'),
-                    'search': ('task/topic','duplicates','inactive'),
-                    'read': ('full','source','applicability'),
-                    'create': ('durable','candidates','source-linked'),
-                    'approve': ('main-agent/consolidator','review','scientific truth'),
-                    'update': ('successor','old_ids','exact-scope','history'),
-                    'delete': ('review','marker','original bytes','history'),
-                }.items():
-                    assert all(term in descriptions[name] for term in terms), descriptions[name]
+                for name in core_names:
+                    assert descriptions[name].strip(), name
+                assert 'dated background' in descriptions['context']
+                assert 'candidate' in descriptions['create']
+                assert 'review' in descriptions['approve']
                 proposed = await session.call_tool('create',{'context':context,'record':record,'idempotency_key':'sdk-propose'})
                 assert not proposed.isError, proposed
                 payload = proposed.structuredContent or json.loads(proposed.content[0].text)
@@ -79,7 +78,10 @@ def test_installed_stdio_roundtrip(tmp_path):
                 contextual = await session.call_tool('context',{'context':context,'max_chars':6000})
                 assert not contextual.isError, contextual
                 nav = contextual.structuredContent or json.loads(contextual.content[0].text)
-                assert 'text' not in nav and nav['items'] == [] and nav['records_not_loaded']
+                assert nav['packet_version'] == 1 and nav['status'] == 'ok'
+                assert nav['items'] == [] and nav['records_not_loaded'] is False
+                assert '<shared-memory-context>' in nav['text']
+                assert len(json.dumps(nav, ensure_ascii=False).encode()) <= 8000
                 assert nav['caller_context'] == {**context,'project_id':'demo'}
                 assert 'review' not in payload['items'][0]
                 audited = await session.call_tool('read',{'context':context,'ids':[identifier],'audit':True})

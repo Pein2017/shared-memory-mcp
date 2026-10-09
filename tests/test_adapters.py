@@ -17,7 +17,10 @@ class Store:
 
     def context(self, context, **kwargs):
         self.calls.append((context, kwargs))
-        return {"status": "ok", "text": self.text, "scope": {}, "items": [], "omitted": 0, "truncated": False}
+        return {"status": "ok", "packet_version": 1, "text": self.text,
+                "scope": {"cwd": context["cwd"], "project_id": "test-project"},
+                "caller_context": {**context, "project_id": "test-project"},
+                "items": [], "omitted": 0, "truncated": False}
 
 
 class HookAdaptersTest(unittest.TestCase):
@@ -63,7 +66,7 @@ class HookAdaptersTest(unittest.TestCase):
         store = Store("x" * 81)
         with self.assertRaises(AdapterInputError):
             handle_hook(store, "codex", self.event(), max_chars=80)
-        self.assertEqual(store.calls[0][1], {"limit": 8, "max_chars": 80})
+        self.assertEqual(store.calls[0][1], {"limit": 8, "max_chars": 80, "max_bytes": 8000})
 
     def test_unmapped_core_context_is_empty_with_diagnostics(self):
         class UnmappedStore:
@@ -108,16 +111,34 @@ class HookAdaptersTest(unittest.TestCase):
             store.promote(caller, proposed["record"]["id"],
                           {"reason": "Isolated fixture review", "evidence": [{"uri": "file:///fixture/owner.md"}]},
                           "fixture-review")
+            store.curate(caller, proposed["record"]["id"],
+                         {"reason": "Fixture context selection review", "evidence": [{"uri": "file:///fixture/owner.md"}]},
+                         "fixture-current-context", details={"extensions": {"narrative": {
+                             "id": "native-context-fixture", "role": "milestone",
+                             "compact": "Native stores remain separate."}}})
             event = self.event(cwd=str(project))
             for harness in ("claude", "codex"):
                 with self.subTest(harness=harness):
                     expected = store.context({**caller, "harness": harness, "actor": harness})
                     output = handle_hook(store, harness, event)
                     self.assertEqual(output["hookSpecificOutput"]["additionalContext"], expected["text"])
+                    unchanged = store.context({**caller, "harness": harness, "actor": harness},
+                                              previous_revision=expected["packet_revision"])
+                    self.assertTrue(unchanged["unchanged"])
+                    self.assertEqual(unchanged["text"], "")
+                    # SessionStart has no event epoch: each resume/compact must deliver afresh.
+                    for source in ("resume", "resume", "compact", "compact"):
+                        refreshed = handle_hook(store, harness, {**event, "source": source})
+                        self.assertEqual(refreshed["hookSpecificOutput"]["additionalContext"], expected["text"])
+                    new_session = {**event, "session_id": "another-session", "source": "resume"}
+                    refreshed = handle_hook(store, harness, new_session)
+                    self.assertIn("another-session", refreshed["hookSpecificOutput"]["additionalContext"])
+                    self.assertNotIn("fixture-session", refreshed["hookSpecificOutput"]["additionalContext"])
                     self.assertTrue(expected["text"].startswith(WORKFLOW_REMINDER + "\n<shared-memory-context>"))
-                    self.assertEqual(expected["items"], [])
-                    self.assertTrue(expected["records_not_loaded"])
-                    self.assertNotIn("Native stores remain separate.", expected["text"])
+                    self.assertEqual([item["id"] for item in expected["items"]], [proposed["record"]["id"]])
+                    self.assertFalse(expected["records_not_loaded"])
+                    self.assertIn("Native stores remain separate.", expected["text"])
+                    self.assertEqual(expected["items"][0]["read_hint"]["ids"], [proposed["record"]["id"]])
                     self.assertEqual(store.read(caller, [proposed["record"]["id"]])["items"][0]["body"], "Native stores remain separate.")
                     self.assertLessEqual(len(expected["text"]), 6000)
 
@@ -134,7 +155,7 @@ class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
                    "memory_schema_tools": ["mcp__shared-memory__" + name for name in probe.TOOLS],
                    "effort_fields_present": False, "caller_contexts": [caller]}
         receipt = {"cwd": caller["cwd"], "session_id": caller["session_id"], "hook_event_name": "SessionStart",
-                   "source": "startup", "exit_code": 0, "text_chars": 1500,
+                   "source": "startup", "exit_code": 0, "text_chars": 1500, "serialized_bytes": 1900,
                    "sentinel_present": True, "record_id_present": True}
         result = {"exit_code": 1, "deadline_hit": False, "stdout": "", "stderr": ""}
         with tempfile.TemporaryDirectory() as scratch:
@@ -146,10 +167,13 @@ class ClaudeNativeProbeAcceptanceTest(unittest.TestCase):
             self.assertEqual(status(), "pass")
             for changed in ({"workflow_reminder_present": False}, {"model": "other"}, {"memory_schema_tools": []}, {"effort_fields_present": True},
                             {"caller_contexts": [{**caller, "session_id": "invented"}]},
-                            {"caller_contexts": [{**caller, "actor": "fixture"}]}):
+                            {"caller_contexts": [{**caller, "actor": "fixture"}]},
+                             ):
                 with self.subTest(changed=changed):
                     self.assertEqual(status({**request, **changed}), "limit")
             self.assertEqual(status(actual_result={**result, "exit_code": 0}), "limit")
+            receipt_path.write_text(json.dumps({**receipt, "serialized_bytes": 8001}) + "\n")
+            self.assertEqual(status(), "limit")
             receipt_path.write_text(json.dumps({**receipt, "cwd": "/other/project"}) + "\n")
             self.assertEqual(status(), "limit")
 

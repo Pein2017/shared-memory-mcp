@@ -1,5 +1,6 @@
 """Trust, recovery and real CLI boundaries retained by recall curation."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -73,20 +74,25 @@ def test_webcodex_public_cli_bridge_uses_real_context(env):
     r = accepted(store, ctx, 'target')
     context = {**ctx, 'harness': 'webcodex', 'session_id': 'wc_sess_isolated_cli'}
     command = [sys.executable, '-m', 'shared_memory_mcp.cli', '--root', str(store.root), 'call', '--tool', 'search']
+    env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')}
     result = subprocess.run(command, input=json.dumps({'context': context, 'query': 'pytest'}),
-                            text=True, capture_output=True, cwd=project)
+                            text=True, capture_output=True, cwd=project,env=env)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload['scope']['cwd'] == str(project) and payload['items'][0]['id'] == r['id']
-    invalid = subprocess.run(command, input='{"context":', text=True, capture_output=True, cwd=project)
+    invalid = subprocess.run(command, input='{"context":', text=True, capture_output=True, cwd=project,env=env)
     assert invalid.returncode != 0
     assert json.loads(invalid.stdout)['diagnostic']['code'] == 'invalid_input'
     nav = subprocess.run(command[:-1] + ['context'], input=json.dumps({'context': context}),
-                         text=True, capture_output=True, cwd=project)
-    assert nav.returncode == 0 and 'text' not in json.loads(nav.stdout)
+                         text=True, capture_output=True, cwd=project,env=env)
+    nav_data = json.loads(nav.stdout)
+    assert nav.returncode == 0 and nav_data['status'] == 'ok' and nav_data['packet_version'] == 1
+    assert '<shared-memory-context>' in nav_data['text']
+    assert nav_data['caller_context']['session_id'] == context['session_id']
+    assert len(json.dumps(nav_data,ensure_ascii=False).encode()) <= 8000
     unknown = {**context, 'cwd': str(project.parent / 'absent-project')}
     failed = subprocess.run(command[:-1] + ['context'], input=json.dumps({'context': unknown}),
-                            text=True, capture_output=True, cwd=project)
+                            text=True, capture_output=True, cwd=project,env=env)
     assert failed.returncode == 2 and json.loads(failed.stdout)['status'] == 'unmapped'
 
 

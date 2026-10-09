@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "documentation": "DISPOSABLE EXAMPLE ONLY. To enable foreground checking, an operator must add these exact-file source_grants to the stable project policy and authorize a reader. No production configuration is modified by this file.",
+  "source_grants": [
+    {
+      "id": "coordexp-research-index",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/index.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-research-story",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/story.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-capacity-question",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/questions/capacity-and-readout.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-greedy-question",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/questions/greedy-compilation.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-preservation-question",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/questions/preservation-and-credit.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-physical-question",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/questions/physical-evaluation.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-visual-question",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/questions/visual-designation-and-causal-use.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-airport-result",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-07-airport-successor-composition/results.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-short-result",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-08-short-continuation-panel/results.md",
+      "format": "document",
+      "schema": "document-v1"
+    },
+    {
+      "id": "coordexp-designation-result",
+      "kind": "file",
+      "path": "/data/CoordExp/.worktrees/research-probes/research/experiments/2026-10-08-instance-designation/results.md",
+      "format": "document",
+      "schema": "document-v1"
+    }
+  ]
+}

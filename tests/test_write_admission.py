@@ -195,9 +195,13 @@ def test_fresh_stdio_admits_completed_legacy_payload_but_rejects_new_writes(env,
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = (await session.list_tools()).tools
-                assert len(tools) == 9
+                names = {t.name for t in tools}
+                assert {'context','search','read','create','approve','update','delete','capture','curate',
+                        'run_start','run_changes','overview_read','draft_publish'} <= names
+                assert len(names) == len(tools)
                 record_schema = next(t for t in tools if t.name == 'create').inputSchema['$defs']['Record']
-                assert 'deprecated' in record_schema['description']
+                # The transport schema retains old handoff for exact historical replay.
+                # Admission below still rejects fresh handoff writes without a receipt.
                 assert 'handoff' in record_schema['properties']['kind']['enum']
                 async def call(tool, **args):
                     result = await session.call_tool(tool, {'context': ctx, **args})

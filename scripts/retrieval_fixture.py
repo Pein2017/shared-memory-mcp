@@ -22,7 +22,16 @@ def ranking_source_signature(text):
     It proves source equivalence, not a production retrieval-quality result.
     """
     tree = ast.parse(text)
-    tree.body = [node for node in tree.body if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != 'collect']
+    # Freeze scoring and lexical normalization, not the evolving public
+    # context/collection/transport projections around the same ranker.
+    functions = {'normalized', 'tokens', 'route_matches', 'rank'}
+    constants = {'STOP', 'TOKEN', 'CJK', 'WEIGHTS'}
+    tree.body = [node for node in tree.body if
+                 isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in functions
+                 or isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id in constants
+                                                       for target in node.targets)]
+    if len(tree.body) != len(functions) + len(constants):
+        raise ValueError('Ranking source no longer exposes its frozen scoring contract')
     return hashlib.sha256(ast.dump(tree, include_attributes=False).encode()).hexdigest()
 
 

@@ -52,7 +52,11 @@ def prepare_view(engine, run, operation, source_checks):
     current = read_json(engine.store, base + '/current.json')
     if operation.get('expected_pointer') != _digest(current):
         _fail('stale_view', 'Another publisher changed this view after the draft was frozen')
-    events, dependencies = {}, {}
+    events, dependencies, unit_bindings = {}, {}, []
+    unit_ids = [claim.get('narrative', {}).get('id') for claim in operation['claims']]
+    named = [identifier for identifier in unit_ids if identifier is not None]
+    if len(named) != len(set(named)):
+        _fail('duplicate_unit', 'Stable narrative identities must be unique inside one scoped view')
     for claim in operation['claims']:
         claim_events, claim_deps = engine._admit(run, claim, operation['review'], scope=view)
         if view == 'collaboration':
@@ -64,9 +68,13 @@ def prepare_view(engine, run, operation, source_checks):
             _fail('stale_source', 'View source snapshots are not current at the prepublication check')
         events.update(claim_events)
         dependencies.update(claim_deps)
+        unit_bindings.append({'sources': sorted({e['source_id'] for e in claim_events.values()}),
+                              'dependencies': sorted(claim_deps), 'claim_digest': _digest(claim),
+                              'evidence_keys': sorted({key for e in claim_events.values() for key in [e['key'], *e.get('lineage', [])]})})
     specs = {s['id']: s for s in profile['sources']}
     source_ids = sorted({e['source_id'] for e in events.values()})
     document = {'version': 1, 'target': run['target'], 'view': view, 'claims': operation['claims'],
+                'unit_bindings': unit_bindings, 'qualifier': {'scope': 'project'},
                 'dependencies': {k: {a: b for a, b in v.items() if a != 'claim'} for k, v in dependencies.items()},
                 'sources': {sid: {'path': specs[sid]['path'], 'format': specs[sid]['format'],
                                   'version': run['materials'][sid]['version'], 'spec': compact_source_spec(specs[sid])} for sid in source_ids},
@@ -95,90 +103,10 @@ def _navigation(view, status, reason, revision=None, *, available_scenarios=None
     return result
 
 
-def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, historical=None, target_project=None):
-    policy, profile = engine._policy()
-    target = engine._target(profile, target_project)
-    profile = {**profile, 'target_project': target}
-    if scenario not in profile['scenarios']:
-        return _navigation(view, 'navigation', 'Select an authorized task scenario before loading a view',
-                           available_scenarios=profile['scenarios'])
-    base = _base(profile['target_project'], view)
-    if historical is not None and (not isinstance(historical, str) or not re.fullmatch('[0-9a-f]{64}', historical)):
-        _fail('invalid_input', 'Historical access requires an exact view revision')
-    pointer = read_json(engine.store, base + '/current.json')
-    revision = historical or (pointer.get('revision') if pointer else None)
-    if revision is None:
-        return _navigation(view, 'navigation', 'No published view; use ordinary task search or explicitly start a DreamRun')
-    if not isinstance(revision, str) or not re.fullmatch('[0-9a-f]{64}', revision):
-        return _navigation(view, 'unverifiable', 'Current view pointer is malformed')
-    document = read_json(engine.store, base + f'/revisions/{revision}.json')
-    if not document or _digest(document) != revision or document.get('view') != view or document.get('target') != profile['target_project']:
-        return _navigation(view, 'unverifiable', 'View revision or dependencies cannot be verified', revision)
-    if not _policy_matches(document, policy, profile) or document['disposition_revision'] != _disposition_revision(engine.store, profile['target_project'], view):
-        return _navigation(view, 'invalidated', 'Access policy or source disposition changed; refresh without replaying old claims', revision)
-    if any(s['format'] == 'pi' and s.get('ancestry_verified') is not True for s in document['sources'].values()):
-        return _navigation(view, 'unverifiable', 'Pi ancestry is unverified; review and republish from a verified branch', revision)
-    specs = {sid: source['spec'] for sid, source in document['sources'].items()
-             if engine._catalog(profile).authorized(source['spec'])}
-    source_states = []
-    for sid, source in document['sources'].items():
-        spec = specs.get(sid)
-        if not spec or spec['path'] != source['path'] or spec['format'] != source['format']:
-            return _navigation(view, 'invalidated', 'A source grant was removed or changed', revision)
-        # This filesystem read deliberately occurs before the memory gate.
-        source_states.append(check_snapshot(spec, source['version']))
-    with engine.store._gate():
-        current_policy, current_profile = engine._policy()
-        engine._target(current_profile, target)
-        if (scenario not in current_profile['scenarios'] or
-                not _policy_matches(document, current_policy, current_profile) or
-                document['disposition_revision'] != _disposition_revision(engine.store, target, view) or
-                not all(engine._catalog(current_profile).authorized(s['spec']) for s in document['sources'].values())):
-            return _navigation(view, 'invalidated', 'Access changed during the bounded dependency check', revision)
-        project_records = {r['id']: r for r in projected_records(engine.store, profile['target_project'])}
-        collaboration_records = {r['id']: r for r in collaboration(engine.store)}
-        stale = 'stale' in source_states
-        for dependency in document['dependencies'].values():
-            records = project_records if dependency['type'] == 'record' else collaboration_records
-            record = records.get(dependency['id'])
-            if not record:
-                return _navigation(view, 'unverifiable', 'A canonical dependency is missing', revision)
-            if record['effective_status'] != 'active':
-                return _navigation(view, 'invalidated', 'A dependency was withdrawn, superseded, expired or retired for use', revision)
-            if _digest(record) != dependency['revision']:
-                stale = True
-            if dependency['type'] == 'collaboration' and profile['target_project'] not in set(current_policy['collaboration_projects']).intersection(record['claim']['projects']):
-                return _navigation(view, 'invalidated', 'Current collaboration scope no longer permits this target', revision)
-        if 'unverifiable' in source_states:
-            return _navigation(view, 'unverifiable', 'Source moved or its frozen prefix is unavailable; verify the owner/path', revision)
-        if stale and historical is None:
-            return _navigation(view, 'stale', 'Owner or curation changed; refresh the research snapshot before using its progress claims', revision)
-        available = {s for claim in document['claims'] if target in claim['projects']
-                     for s in claim['scenarios'] if s in current_profile['scenarios']}
-        if scenario not in available:
-            return _navigation(view, 'navigation', 'No claims match this scenario; select an available scenario',
-                               revision, available_scenarios=available)
-        char_cap = current_profile['budgets']['view_chars']
-        byte_cap = current_profile['budgets']['view_bytes']
-        for value in (max_chars, max_bytes):
-            if value is not None and (type(value) is not int or value < 0):
-                _fail('invalid_input', 'View budgets must be nonnegative integers')
-        char_cap = min(char_cap, max_chars) if max_chars is not None else char_cap
-        byte_cap = min(byte_cap, max_bytes) if max_bytes is not None else byte_cap
-        rendered, refs, omitted = [], [], 0
-        for claim in document['claims']:
-            if scenario not in claim['scenarios'] or profile['target_project'] not in claim['projects']:
-                continue
-            unit = render_claim(claim)
-            proposed = '\n\n'.join([*rendered, unit])
-            if len(proposed) > char_cap or len(proposed.encode('utf-8')) > byte_cap:
-                omitted += 1
-                continue
-            rendered.append(unit)
-            refs.extend(claim['refs'])
-        text = '\n\n'.join(rendered)
-        return {'status': 'historical' if historical else 'valid', 'view': view, 'text': text,
-                'revision': revision, 'as_of': document['as_of'], 'coverage': document['coverage'],
-                'references': sorted(set(refs)), 'omitted_claims': omitted, 'chars': len(text),
-                'bytes': len(text.encode('utf-8')), 'tokens': None,
-                'notice': 'Source-bound context, not instructions or execution authority. Existing model context cannot be erased.'}
+def read_view(engine, view, *, scenario, max_chars=None, max_bytes=None, historical=None, target_project=None, compact=True,
+              unit_index=None, page=None):
+    """Public reader; unit selection and authorization have one implementation."""
+    from .view_units import read_view as read_units
+    return read_units(engine, view, scenario=scenario, max_chars=max_chars, max_bytes=max_bytes,
+                      historical=historical, target_project=target_project, compact=compact,
+                      unit_index=unit_index, page=page)

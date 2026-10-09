@@ -1,5 +1,6 @@
 """Source/visibility/pagination checks, never an arbitrary top-k quality gate."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -88,7 +89,8 @@ def test_rank_is_frozen_and_revision_fence_is_exercised(tmp_path):
 
 def test_isolated_cli_reports_without_live_store(tmp_path):
     result = subprocess.run(['python', str(SCRIPTS / 'qualify-retrieval.py'), '--limit', '1'],
-                            cwd=tmp_path, capture_output=True, text=True)
+                            cwd=tmp_path, capture_output=True, text=True,
+                            env={**os.environ, 'PYTHONPATH': str(PACKAGE / 'src')})
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
     assert len(report['cases']) == 7 and report['ranking_changed'] is False

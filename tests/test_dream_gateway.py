@@ -114,7 +114,10 @@ def test_gateway_stdio_identity_isolation_and_publication(tmp_path):
                 # Exercise the ordinary final consumer, not only Dreaming receipts.
                 ordinary = make_server(store)
                 read = await ordinary.call_tool('read', {'context': owner_caller, 'ids': [record_id]})
-                assert any('coverage 7' in item.text for item in read if hasattr(item, 'text'))
+                contents = read[0] if isinstance(read, tuple) else read
+                ordinary_payload = json.loads(contents.content[0].text)
+                assert ordinary_payload['items'][0]['id'] == record_id
+                assert 'coverage 7' in ordinary_payload['items'][0]['body']
                 # A live process must re-evaluate source and executor grants on each call.
                 revoked = deepcopy(policy)
                 revoked['profiles']['fixture']['source_grants'] = [revoked['profiles']['fixture']['source_grants'][1]]

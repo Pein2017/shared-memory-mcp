@@ -27,7 +27,14 @@ def bounded_strings(value, name, *, nonempty=False, limit=32):
 
 
 def validate_claim(claim):
-    _keys(claim, CLAIM_FIELDS, CLAIM_FIELDS, 'claim')
+    _keys(claim, CLAIM_FIELDS, CLAIM_FIELDS | {'narrative', 'task_modes'}, 'claim')
+    if 'narrative' in claim:
+        from .narrative import validate
+        validate(claim['narrative'])
+    if 'task_modes' in claim:
+        modes = claim['task_modes']
+        if not isinstance(modes, list) or not modes or len(modes) > 2 or any(x not in {'research', 'general'} for x in modes):
+            _fail('invalid_input', 'Claim task_modes must contain supported selection modes')
     for key in ('topic', 'text', 'conditions'):
         _nonempty(claim[key], 'claim.' + key)
         if len(claim[key]) > 8192:
@@ -62,8 +69,9 @@ def reviewed(claim, review):
         _fail('pending_review', 'Risk-bearing claims need a separately authorized responsible reviewer')
 
 
-def render_claim(claim):
-    lines = [f"[{claim['level']}] {claim['text']}", f"Conditions: {claim['conditions']}",
+def render_claim(claim, *, compact=False):
+    text = claim.get('narrative', {}).get('compact', claim['text']) if compact else claim['text']
+    lines = [f"[{claim['level']}] {text}", f"Conditions: {claim['conditions']}",
              'Scenarios: ' + ', '.join(claim['scenarios']), 'Projects: ' + ', '.join(claim['projects'])]
     if claim['exceptions']:
         lines.append('Exceptions: ' + '; '.join(claim['exceptions']))
@@ -112,7 +120,24 @@ def collaboration(store):
         try:
             r = parse_markdown(path.read_bytes())
             fields = {'version', 'id', 'owner', 'claim', 'body', 'created_at', 'provenance', 'events'}
-            _keys(r, fields, fields | {'sources'}, 'collaboration record')
+            _keys(r, fields, fields | {'sources', 'qualifier', 'live_review', 'content_digest'}, 'collaboration record')
+            if 'qualifier' in r:
+                q = r['qualifier']
+                _keys(q, {'scope'}, {'scope', 'worktree_id', 'task_id'}, 'collaboration qualifier')
+                if (q['scope'] not in {'project', 'worktree', 'task'} or
+                        q['scope'] == 'project' and set(q) != {'scope'} or
+                        q['scope'] == 'worktree' and set(q) != {'scope', 'worktree_id'} or
+                        q['scope'] == 'task' and set(q) != {'scope', 'worktree_id', 'task_id'}):
+                    _fail('corrupt_dream_record', 'Invalid collaboration applicability')
+                if 'worktree_id' in q and (not isinstance(q['worktree_id'], str) or not __import__('re').fullmatch('[0-9a-f]{24}', q['worktree_id'])):
+                    _fail('corrupt_dream_record', 'Invalid collaboration worktree identity')
+            if 'live_review' in r:
+                from .narrative import validate_live_review
+                validate_live_review(r['live_review'], r['provenance'])
+                if 'content_digest' not in r:
+                    _fail('corrupt_dream_record', 'Live review needs immutable content binding')
+            if 'content_digest' in r and r['content_digest'] != _digest({k: r.get(k) for k in ('claim', 'sources', 'qualifier', 'live_review')}):
+                _fail('corrupt_dream_record', 'Collaboration content binding failed')
             if 'sources' in r:
                 _sources(r['sources'])
             if (r['version'] != 2 or r['owner'] != {'type': 'collaboration', 'subject': 'Pein'} or
@@ -125,12 +150,26 @@ def collaboration(store):
                 _fail('corrupt_dream_record', 'Collaboration body/claim binding failed')
             if not isinstance(r['events'], list) or not 1 <= len(r['events']) <= 128:
                 _fail('corrupt_dream_record', 'Invalid collaboration lifecycle journal')
-            previous, state = 'start', None
+            previous, state, details, retired = 'start', None, {}, False
             if r['claim']['level'] == 'inferred' and r['events'][0].get('state') != 'candidate':
                 _fail('corrupt_dream_record', 'Inferred collaboration must originate as a candidate')
             for event in r['events']:
                 fields = {'key', 'operation_digest', 'previous', 'state', 'executor', 'at', 'review', 'digest', 'supersedes'}
-                _keys(event, fields, fields, 'collaboration event')
+                _keys(event, fields, fields | {'curation'}, 'collaboration event')
+                if 'curation' in event:
+                    from .curation import validate_details
+                    patch = event['curation']
+                    _keys(patch, {'details', 'retired'}, {'details', 'retired'}, 'collaboration curation')
+                    if patch['retired'] is not None and type(patch['retired']) is not bool:
+                        _fail('corrupt_dream_record', 'Invalid retirement metadata')
+                    if event['state'] != state or event['supersedes']:
+                        _fail('corrupt_dream_record', 'Curation cannot change lifecycle or replacement edges')
+                    details = {**details, **patch['details']}
+                    validate_details(details, {'sources': r.get('sources', []), 'scope': r.get('qualifier', {'scope': 'project'})['scope'],
+                                             'project_id': r['claim']['projects'][0]},
+                                     {p['id'] for p in store._registry()['projects']})
+                    if patch['retired'] is not None:
+                        retired = patch['retired']
                 _nonempty(event['key'], 'event.key')
                 _utc(event['at'])
                 validate_executor(event['executor'])
@@ -144,13 +183,14 @@ def collaboration(store):
                         event['digest'] != _digest({k: v for k, v in event.items() if k != 'digest'})):
                     _fail('corrupt_dream_record', 'Invalid collaboration operation chain')
                 if (event['state'] not in {'candidate', 'active', 'withdrawn'} or
-                        state in {'active', 'withdrawn'} and event['state'] != 'withdrawn'):
+                        state in {'active', 'withdrawn'} and event['state'] != 'withdrawn' and 'curation' not in event):
                     _fail('corrupt_dream_record', 'Invalid collaboration lifecycle transition')
                 if event['state'] == 'active':
                     reviewed(r['claim'], event['review'])
                 operation_keys.add(event['key'])
                 previous, state = event['digest'], event['state']
-            records.append({**r, 'effective_status': state})
+            records.append({**r, 'effective_status': 'retired' if retired and state == 'active' else state,
+                            'details': details, 'recall_retired': retired, 'curation_revision': _digest(r['events'])})
         except (ValueError, TypeError, KeyError, OSError) as exc:
             _fail('corrupt_dream_record', f'Invalid collaboration record: {type(exc).__name__}')
     by_id = {r['id']: r for r in records}
@@ -279,7 +319,7 @@ def collaboration_effect(store, operation, caller, *, source_uris=None):
         current = records.get(operation['record_id'])
         if not current or current['effective_status'] in {'withdrawn', 'superseded'}:
             _fail('stale_record', 'Collaboration target is unavailable')
-        r = {k: v for k, v in current.items() if k != 'effective_status'}
+        r = {k: v for k, v in current.items() if k not in {'effective_status', 'details', 'recall_retired', 'curation_revision'}}
         if action == 'collaboration_publish':
             if current['effective_status'] != 'candidate' or current['claim'] != claim:
                 _fail('claim_mismatch', 'Publish the unchanged candidate after explicit semantic review')

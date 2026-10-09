@@ -110,13 +110,12 @@ def test_opt_in_hook_consumes_only_actual_project_and_respects_revocation(tmp_pa
     event = {'hook_event_name': 'SessionStart', 'source': 'startup', 'cwd': owner_caller['cwd'], 'session_id': 'synthetic-consumer'}
     def text(output):
         return output['hookSpecificOutput']['additionalContext']
-    assert 'SYNTHETIC_' not in text(handle_hook(store, harness, event))
-    rendered = text(handle_hook(store, harness, event, dream_profile='fixture', dream_scenario='research'))
+    rendered = text(handle_hook(store, harness, event))
     assert 'SYNTHETIC_SCOPED_PREFERENCE' in rendered and len(rendered) <= 6000
     wrong = {**event, 'cwd': caller['cwd']}
-    assert 'SYNTHETIC_' not in text(handle_hook(store, harness, wrong, dream_profile='fixture', dream_scenario='research'))
+    assert 'SYNTHETIC_' not in text(handle_hook(store, harness, wrong))
     add_disposition(store, caller, target='demo', topic='*', scope='collaboration', source_keys=[key], kind='no_reuse', reason='Synthetic revocation')
-    assert 'SYNTHETIC_' not in text(handle_hook(store, harness, event, dream_profile='fixture', dream_scenario='research'))
+    assert 'SYNTHETIC_' not in text(handle_hook(store, harness, event))
 
 
 def test_cli_partial_is_nonzero_and_default_manifest_stays_separate(tmp_path):
@@ -128,4 +127,8 @@ def test_cli_partial_is_nonzero_and_default_manifest_stays_separate(tmp_path):
     result = cli(store, caller, 'publish', '--run-id', rid, '--generation', gen, '--revision', frozen['draft_revision'], expected=3)
     assert result['status'] == 'partial' and len(store._load('demo')) == 1
     from shared_memory_mcp.server import make_server
-    assert {t.name for t in asyncio.run(make_server(store).list_tools())} == {'context','search','read','create','approve','update','delete','capture','curate'}
+    advertised = asyncio.run(make_server(store).list_tools())
+    names = {t.name for t in advertised}
+    assert {'context','search','read','create','approve','update','delete','capture','curate',
+            'run_start','run_changes','overview_read','draft_publish','issue_search','issue_resolve'} <= names
+    assert len(names) == len(advertised)

@@ -26,7 +26,7 @@ SEARCH_RESPONSE_BYTES = 12000
 SEARCH_BODY_BYTES = 1024
 WORKFLOW_REMINDER = (
     'Shared-memory reminder: Use the shared-memory skill for nontrivial registered-project coding/research. '
-    'Startup provides routing only; search by task/topic once the task is known. '
+    'Startup supplies dated background; select research/general and retrieve relevant task evidence. '
     'Capture durable source-linked findings; reviewed publication is not proof. '
     'Handoff is independent transport, not an automatic memory capture trigger. '
     'Use actual caller identity and return to original sources before consequential use. '
@@ -131,6 +131,23 @@ def _within(path, root):
 
 
 class MemoryStore:
+    collection = 'project'
+
+    def collection_directory(self, project_id, part='records'):
+        """Collections share registry/gate/lifecycle, not canonical content ownership."""
+        from .curation import safe_path
+        if part not in {'records', 'curation', 'capture'}:
+            _fail('invalid_collection', 'Unknown canonical collection part')
+        if self.collection == 'history':
+            relative = Path('history') / project_id / ('episodes' if part == 'records' else part)
+        else:
+            relative = Path(part) / project_id
+        return safe_path(self, relative)
+
+    def for_collection(self, collection='project'):
+        from .maintenance import select_collection
+        return select_collection(self, collection)
+
     def __init__(self, root):
         self.root = Path(root).expanduser().resolve()
 
@@ -288,8 +305,12 @@ class MemoryStore:
             _fail('unsupported_kind', 'New handoff memory and unfinished handoff publication are disabled; local handoff documents remain supported. Capture reusable source-linked findings separately.')
 
     def _record_input(self, record):
-        _keys(record, {'kind','title','body','scope','sources'}, {'kind','title','body','scope','sources','expires_at'}, 'record')
-        if not isinstance(record['kind'],str) or record['kind'] not in KINDS or not isinstance(record['scope'],str) or record['scope'] not in ('project','worktree','task'):
+        allowed = {'kind','title','body','scope','sources','expires_at'}
+        if self.collection == 'history':
+            allowed.add('episode')
+        _keys(record, {'kind','title','body','scope','sources'}, allowed, 'record')
+        kinds = KINDS | {'episode'} if self.collection == 'history' else KINDS
+        if not isinstance(record['kind'],str) or record['kind'] not in kinds or not isinstance(record['scope'],str) or record['scope'] not in ('project','worktree','task'):
             _fail('invalid_input','Unsupported record kind or scope')
         _nonempty(record['title'],'title')
         _nonempty(record['body'],'body')
@@ -301,7 +322,7 @@ class MemoryStore:
         return record
 
     def _load(self, project_id):
-        directory = self.root / 'records' / project_id
+        directory = self.collection_directory(project_id)
         records = []
         if (self.root/'records').is_symlink() or directory.is_symlink():
             _fail('corrupt_record','Canonical record directories may not be symlinks')
@@ -363,6 +384,8 @@ class MemoryStore:
     def _validate_canonical(self, r, body, path, project_id):
         required = {'version','id','project_id','scope','kind','title','sources','status','created_at','provenance','content_digest'}
         allowed = required | {'proposal','worktree_id','task_id','expires_at','review','promotion','supersedes','withdraws'}
+        if self.collection == 'history':
+            allowed.add('episode')
         _keys(r,required,allowed,'canonical record')
         if 'withdraws' in r:
             if not isinstance(r['withdraws'],str) or not RECORD_ID.fullmatch(r['withdraws']) or r['kind'] != 'decision' or r['status'] != 'active' or {'proposal','expires_at','supersedes'} & r.keys():
@@ -371,7 +394,7 @@ class MemoryStore:
             raise ValueError('Ordinary record lacks proposal')
         if r['version'] != 1 or not RECORD_ID.fullmatch(r['id']) or path.stem != r['id'] or r['project_id'] != project_id or r['status'] not in ('candidate','active'):
             raise ValueError('Identity or status mismatch')
-        self._record_input({name:value for name,value in {**r,'body':body}.items() if name in {'kind','title','body','scope','sources','expires_at'}})
+        self._record_input({name:value for name,value in {**r,'body':body}.items() if name in {'kind','title','body','scope','sources','expires_at','episode'}})
         _utc(r['created_at'])
         _keys(r['provenance'],{'harness','session_id','actor','cwd'}, {'harness','session_id','actor','cwd','git'},'provenance')
         if r['provenance']['harness'] not in HARNESSES or not Path(r['provenance']['cwd']).is_absolute():
@@ -417,7 +440,7 @@ class MemoryStore:
             raise ValueError('Accepted/proposed content integrity mismatch')
 
     def _content(self, record):
-        return {key:record[key] for key in ('project_id','scope','worktree_id','task_id','kind','title','body','sources','expires_at','withdraws') if key in record}
+        return {key:record[key] for key in ('project_id','scope','worktree_id','task_id','kind','title','body','sources','expires_at','withdraws','episode') if key in record}
 
     def _qualifier(self, r):
         return tuple(r.get(key) for key in ('project_id','scope','worktree_id','task_id'))
@@ -446,7 +469,7 @@ class MemoryStore:
         data = ('```json\n'+_json(metadata)+'\n```\n'+r['body']).encode('utf-8')
         if len(data) > MAX_RECORD_BYTES:
             _fail('invalid_input','Canonical record exceeds size bound')
-        target = self.root / 'records' / r['project_id'] / (r['id']+'.md')
+        target = self.collection_directory(r['project_id']) / (r['id']+'.md')
         # The SQLite transaction gates this create check and publication against
         # cooperating writers. Promotion alone replaces an existing record.
         if create and os.path.lexists(target):
@@ -463,6 +486,8 @@ class MemoryStore:
             scope = self._resolve(context)
             if record['scope'] == 'task' and 'task_id' not in scope:
                 _fail('invalid_input','Task-scoped records require context.task_id')
+            if self.collection == 'history' and record.get('episode', {}).get('project_id') != scope['project_id']:
+                _fail('scope_mismatch', 'An episode must retain the actual target project mapping')
             digest = _digest({'context':context,'record':record})
             records = self._load(scope['project_id'])
             prior = self._retry(records,'proposal',idempotency_key,digest)
@@ -512,6 +537,11 @@ class MemoryStore:
                 _fail('expired_record','Expired candidates cannot be promoted')
             if r['effective_status'] != 'candidate':
                 _fail('immutable_record','Only effective candidates can be published')
+            from .curation import projected_records
+            from .narrative import check_replacements
+            reviewed_records = projected_records(self, scope['project_id'])
+            reviewed_record = next(item for item in reviewed_records if item['id'] == id)
+            check_replacements(self, scope, r, reviewed_record['details'], records=reviewed_records, context=context)
             for old_id in old_ids:
                 old = by_id.get(old_id)
                 if not old or old['effective_status'] != 'active' or self._qualifier(old) != self._qualifier(r):
@@ -572,10 +602,12 @@ class MemoryStore:
         return rank(records, query)
 
     def search(self, context, query, limit=20, include_inactive=False, *,
-               domain=None, offset=0, include_shared=True, expected_revision=None):
+               domain=None, offset=0, include_shared=True, expected_revision=None,
+               task_mode=None, mode_restriction=None):
         from .recall import search
         return search(self, context, query, limit, include_inactive, domain=domain,
-                      offset=offset, include_shared=include_shared, expected_revision=expected_revision)
+                      offset=offset, include_shared=include_shared, expected_revision=expected_revision,
+                      task_mode=task_mode, mode_restriction=mode_restriction)
 
     def _search_full(self, context, query, limit=20, include_inactive=False):
         if not isinstance(limit,int) or isinstance(limit,bool) or not 1 <= limit <= 100:
@@ -591,9 +623,9 @@ class MemoryStore:
         from .recall import read
         return read(self, context, ids, include_inactive, include_shared=include_shared)
 
-    def capture(self, context, record, idempotency_key, review=None, details=None):
+    def capture(self, context, record, idempotency_key, review=None, details=None, *, live_correction=None):
         from .curation import capture
-        return capture(self, context, record, idempotency_key, review, details)
+        return capture(self, context, record, idempotency_key, review, details, live_correction=live_correction)
 
     def curate(self, context, id, review, idempotency_key, details=None, retired=None,
                expected_content_digest=None, expected_revision=None):
@@ -601,16 +633,22 @@ class MemoryStore:
         return curate(self, context, id, review, idempotency_key, details, retired,
                       expected_content_digest, expected_revision)
 
-    def context(self, context, query='', limit=8, max_chars=6000):
+    def context(self, context, query='', limit=8, max_chars=6000, *, task_mode=None,
+                max_bytes=8000, mode_restriction=None, previous_revision=None, token_counter=None,
+                current_status=False):
         try:
-            return self._context(context,query,limit,max_chars)
+            from .context_packet import compose
+            return compose(self, context, query, limit, max_chars, task_mode=task_mode,
+                           max_bytes=max_bytes, mode_restriction=mode_restriction,
+                           previous_revision=previous_revision, token_counter=token_counter,
+                           current_status=current_status)
         except MemoryError as exc:
             status = 'unmapped' if exc.code in ('unmapped_scope','uninitialized') else 'ambiguous' if exc.code == 'ambiguous_scope' else 'invalid'
             return {'status':status,'scope':None,'items':[],'text':'','omitted':0,'truncated':False,'diagnostic':getattr(exc,'diagnostic',{'code':exc.code,'message':str(exc)})}
 
-    def _context(self, context, query='', limit=8, max_chars=6000):
-        from .recall import context_view
-        return context_view(self, context, query, limit, max_chars)
+    def _context(self, context, query='', limit=8, max_chars=6000, **options):
+        from .context_packet import compose
+        return compose(self, context, query, limit, max_chars, **options)
 
     def doctor(self):
         with self._gate():

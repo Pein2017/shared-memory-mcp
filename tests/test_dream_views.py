@@ -50,10 +50,11 @@ def test_unrelated_policy_changes_preserve_current_and_historical_views(tmp_path
     for historical in [None, current['revision']]:
         result = engine.overview('research', scenario='research', historical=historical)
         assert result['status'] == ('historical' if historical else 'valid')
-        if change == 'budgets':
-            assert result['text'] == '' and result['omitted_claims'] == 1
-        else:
-            assert result['text'] == current['text']
+        # Publication/execution budgets do not cap ordinary consumption.
+        assert result['text'] == current['text']
+    if change == 'budgets':
+        limited = engine.overview('research', scenario='research', max_chars=10)
+        assert limited['status'] == 'budget-limited' and limited['text'] == ''
 
 
 @pytest.mark.parametrize('change', ['grant', 'attestation', 'scenario', 'target', 'executor', 'collaboration'])
@@ -137,7 +138,7 @@ def test_equivalent_reader_profile_retains_existing_access(tmp_path):
     assert reader.overview('research', scenario='research')['text'] == current['text']
 
 
-def test_current_budget_shrink_during_source_io_is_applied(tmp_path, monkeypatch):
+def test_execution_budget_change_during_io_does_not_blank_reader(tmp_path, monkeypatch):
     (engine, store, _, _, policy, _, _), _ = published(tmp_path)
     updated = deepcopy(policy)
     updated['profiles']['fixture']['budgets']['view_chars'] = 10
@@ -149,7 +150,7 @@ def test_current_budget_shrink_during_source_io_is_applied(tmp_path, monkeypatch
     monkeypatch.setattr(dream_views, 'check_snapshot', shrink)
     result = engine.overview('research', scenario='research')
     assert result['status'] == 'valid'
-    assert result['text'] == '' and result['omitted_claims'] == 1
+    assert result['text'] and result['omitted_claims'] == 0
 
 
 def test_inferred_collaboration_permission_remains_a_read_dependency(tmp_path):

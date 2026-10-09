@@ -29,7 +29,7 @@ def collect(profile, previous=None, *, reconsider=False):
         old = previous['materials'].get(sid) if previous and old_specs.get(sid) == source and not reconsider else None
         old_processed = previous['processed'] if old else {}
         cursor = None
-        if old and source['format'] != 'document' and all(e['key'] in old_processed for e in old['events']):
+        if old and source['format'] != 'document' and all(old_processed.get(e['key']) in {'processed', 'excluded', 'no-signal'} for e in old['events']):
             cursor = deepcopy(old.get('cursor'))
         offset = cursor.get('offset', 0) if cursor else 0
         # Prefix verification occurs once before and once after a source batch.
@@ -79,3 +79,52 @@ def collect(profile, previous=None, *, reconsider=False):
         event_budget -= len(result['events'])
         collected[sid] = result
     return collected, processed, profile['budgets']['source_bytes'] - remaining
+
+
+def change_set(engine, run_id, *, max_bytes=12000):
+    """Only public, currently permitted frozen excerpts; membership changes are not truth changes."""
+    import difflib
+    from .core import _json
+    if type(max_bytes) is not int or not 512 <= max_bytes <= 12000:
+        _fail('invalid_input', 'Change-set budget must be between 512 and 12000 bytes')
+    run = engine._run(run_id)
+    previous = engine._run(run['previous_run'], check_caller=False) if run.get('previous_run') else None
+    current = engine.materials(run_id)['sources']
+    authorized = {s['id'] for s in engine._effective(run)['sources']}
+    sources = []
+    for sid in sorted(set(current) | set(previous['materials'] if previous else {})):
+        new = current.get(sid)
+        old = previous['materials'].get(sid) if previous else None
+        row = {'source_id': sid, 'from_version': old.get('version') if old else None,
+               'to_version': new.get('version') if new else None}
+        if sid not in authorized or not new or not new.get('version'):
+            row['change'] = 'unavailable'
+        elif old and new.get('version') == old.get('version'):
+            row['change'] = 'unchanged'
+        else:
+            new_events = new.get('events', [])
+            allowed_old = [e for e in (old or {}).get('events', []) if not engine._forbidden_source(run, e)]
+            before = '\n'.join(e['text'] for e in allowed_old)
+            after = '\n'.join(e['text'] for e in new_events)
+            row['change'] = 'added' if old is None else 'appended' if after.startswith(before) else 'modified'
+            row['diff'] = ''.join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
+                                                      fromfile='previous-reviewed-excerpt', tofile='current-frozen-excerpt'))[:1600]
+            row['excerpt_only'] = True
+        sources.append(row)
+    before_ns = previous.get('working_basis', {}).get('namespace', {}) if previous else {}
+    after_ns = run['basis']['namespace']
+    memory_changes = [{'path': path, 'change': 'added' if path not in before_ns else 'unavailable' if path not in after_ns else 'modified'}
+                      for path in sorted(set(before_ns) | set(after_ns)) if before_ns.get(path) != after_ns.get(path)]
+    result = {'run_id': run_id, 'review_objective': run.get('review_objective'),
+              'source_changes': run.get('source_changes', 'unknown'),
+              'objective_completion': run.get('objective_completion', 'unknown'),
+              'pending_review': sum(v == 'pending-review' for v in run['processed'].values()),
+              'unresolved_effects': len(run['unresolved']), 'sources': [], 'memory_changes': [],
+              'from_run': previous['id'] if previous else None, 'omitted': 0,
+              'notice': 'Source changes and processing coverage do not establish semantic review or scientific support.'}
+    for key, items in [('sources', sources), ('memory_changes', memory_changes)]:
+        for item in items:
+            result[key].append(item)
+            if len(_json(result).encode()) > max_bytes:
+                result[key].pop(); result['omitted'] += 1
+    return result

@@ -24,21 +24,9 @@ def _add_context(parser):
 
 
 def call_operation(store, tool, arguments):
-    """Fixed public operation bridge for real callers without a native MCP route."""
-    operations = {'context': store.context, 'search': store.search, 'read': store.read,
-                  'create': store.propose, 'approve': store.promote, 'update': store.supersede,
-                  'delete': store.delete, 'capture': store.capture, 'curate': store.curate}
-    if tool not in operations or not isinstance(arguments, dict):
-        raise MemoryError('invalid_input', 'Expected a public operation and JSON object arguments')
-    from .recall import public_projection
-    arguments = dict(arguments)
-    audit = arguments.pop('audit', False) if tool == 'read' else False
-    if not isinstance(audit, bool):
-        raise MemoryError('invalid_input', 'audit must be boolean')
-    try:
-        return public_projection(tool, operations[tool](**arguments), audit)
-    except TypeError as exc:
-        raise MemoryError('invalid_input', 'Arguments do not match the public operation contract') from exc
+    """The exact same public dispatcher is used by the single MCP entrypoint."""
+    from .operations import call
+    return call(store, tool, arguments)
 
 
 def main(argv=None):
@@ -60,14 +48,15 @@ def main(argv=None):
     recall.add_argument('--query',default='')
     recall.add_argument('--limit',type=int,default=8)
     recall.add_argument('--max-chars',type=int,default=6000)
-    recall.add_argument('--dream-profile')
-    recall.add_argument('--dream-scenario', default='general')
+    recall.add_argument('--max-bytes',type=int,default=8000)
+    recall.add_argument('--task-mode', choices=['research', 'general'])
+    recall.add_argument('--previous-revision')
+    recall.add_argument('--current-status', action='store_true')
     hook = commands.add_parser('hook')
     hook.add_argument('--harness',required=True,choices=['claude','codex'])
-    hook.add_argument('--dream-profile')
-    hook.add_argument('--dream-scenario', default='general')
     call = commands.add_parser('call')
-    call.add_argument('--tool', required=True, choices=['context','search','read','create','approve','update','delete','capture','curate'])
+    from .operations import PUBLIC
+    call.add_argument('--tool', required=True, choices=PUBLIC)
     server = commands.add_parser('serve')
     args = parser.parse_args(argv)
     try:
@@ -82,11 +71,9 @@ def main(argv=None):
             result = store.doctor()
         elif args.command == 'context':
             context = {key:getattr(args,key) for key in ('cwd','harness','session_id','actor','task_id','project_id') if getattr(args,key) is not None}
-            result = store.context(context,args.query,args.limit,args.max_chars)
-            if args.dream_profile:
-                from .dream_transport import append_startup_collaboration
-                result = append_startup_collaboration(store, context, result, args.dream_profile,
-                                                       args.dream_scenario, max_chars=args.max_chars)
+            result = store.context(context,args.query,args.limit,args.max_chars, task_mode=args.task_mode,
+                                   max_bytes=args.max_bytes, previous_revision=args.previous_revision,
+                                    current_status=args.current_status)
         elif args.command == 'call':
             raw = sys.stdin.read(1048577)
             if len(raw) > 1048576:
@@ -103,7 +90,7 @@ def main(argv=None):
                 return 0
         elif args.command == 'hook':
             from .adapters import hook_main
-            return hook_main(store,args.harness, dream_profile=args.dream_profile, dream_scenario=args.dream_scenario)
+            return hook_main(store,args.harness)
         else:
             from .server import serve
             serve(store)

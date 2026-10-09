@@ -63,6 +63,66 @@ def add_hook(document: dict, command: str) -> dict:
     return result
 
 
+LEGACY_NAME = "shared-memory-dreaming"
+
+
+def plan_owned_legacy(document: dict, section: str, cli: str, root: Path, profiles: dict) -> dict:
+    """Prove exact ownership before proposing removal of the old second provider.
+
+    Unrecognized similarly named registrations are conflicts, not cleanup targets.
+    This inspect-only contract has no subprocess or filesystem effects.
+    """
+    if section not in {"mcpServers", "mcp_servers"}:
+        raise ValueError("Unsupported owned provider section")
+    bindings = document.get(section, {})
+    if not isinstance(bindings, dict):
+        raise ValueError("Expected an MCP provider mapping")
+    entry = bindings.get(LEGACY_NAME)
+    if entry is None:
+        return {"owned": False, "provider": LEGACY_NAME}
+    if not isinstance(entry, dict):
+        raise ValueError("Legacy Dreaming provider has an unrecognized descriptor")
+    allowed = {"command", "args", "type", "startup_timeout_sec", "tool_timeout_sec", "enabled"}
+    if section == "mcpServers":
+        allowed.add("exposure")
+        if "exposure" in entry and entry["exposure"] not in ("codemode", "deferred", "direct", "hidden"):
+            raise ValueError("Legacy Pi MCP exposure is unrecognized")
+    if set(entry) - allowed or entry.get("command") != cli:
+        raise ValueError("Legacy Dreaming registration is not identifiably owned")
+    if entry.get("type", "stdio") != "stdio" or entry.get("enabled", True) is not True:
+        raise ValueError("Legacy Dreaming transport or enablement differs")
+    args = entry.get("args")
+    prefix = ["--root", str(root), "dream", "gateway", "--profile"]
+    if (not isinstance(args, list) or len(args) not in (6, 7)
+            or args[:len(prefix)] != prefix or
+            args[5] not in profiles or
+            (len(args) == 7 and args[6] != "--enable-publisher")):
+        raise ValueError("Legacy Dreaming root/profile/arguments cannot be proven")
+    if any(type(entry[k]) is not int or entry[k] < 0 for k in
+           ("startup_timeout_sec", "tool_timeout_sec") if k in entry):
+        raise ValueError("Legacy MCP timeouts are noncanonical")
+    return {"owned": True, "provider": LEGACY_NAME, "profile": args[5],
+            "publisher_selected": len(args) == 7}
+
+
+def cutover_owned_legacy_json(document: dict, section: str, cli: str, root: Path,
+                              profiles: dict) -> dict:
+    """Plan/construct an exact one-provider JSON edit; preserve all other keys."""
+    status = plan_owned_legacy(document, section, cli, root, profiles)
+    result = copy.deepcopy(document)
+    if status["owned"]:
+        del result[section][LEGACY_NAME]
+    return result
+
+
+def require_active_common(entry: dict, command: str, arguments: list[str]) -> None:
+    if (not isinstance(entry, dict) or entry.get("command") != command
+            or entry.get("args", []) != arguments
+            or entry.get("type", "stdio") != "stdio"
+            or entry.get("enabled", True) is not True):
+        raise ValueError("Expected the exact active shared-memory MCP entry before cutover")
+
+
 def add_server(document: dict, command: str, arguments: list[str]) -> dict:
     result = copy.deepcopy(document)
     servers = result.setdefault("mcpServers", {})
@@ -70,6 +130,7 @@ def add_server(document: dict, command: str, arguments: list[str]) -> dict:
     if existing is not None:
         if existing.get("command") != command or existing.get("args", []) != arguments:
             raise ValueError("Existing shared-memory MCP entry belongs to another configuration")
+        require_active_common(existing, command, arguments)
     else:
         servers[NAME] = {"command": command, "args": arguments, "exposure": "direct"}
     return result
@@ -228,17 +289,34 @@ def main() -> int:
     existing = codex_config.get("mcp_servers", {}).get(NAME)
     if existing and (existing.get("command") != str(cli) or existing.get("args", []) != arguments):
         parser.error("Codex shared-memory MCP entry has another owner")
+    if existing is not None:
+        require_active_common(existing, str(cli), arguments)
+    policy = load_json(root / "dreaming" / "policy.json")
+    profiles = policy.get("profiles", {})
+    if not isinstance(profiles, dict):
+        parser.error("Legacy Dreaming policy profiles cannot be inspected")
+    pi_config = load_json(pi / "mcp.json")
+    owned_legacy = {
+        "codex": plan_owned_legacy(codex_config, "mcp_servers", str(cli), root, profiles),
+        "pi": plan_owned_legacy(pi_config, "mcpServers", str(cli), root, profiles),
+    }
     updates = {
         home / "hooks.json": add_hook(load_json(home / "hooks.json"), commands["codex"]),
-        pi / "mcp.json": add_server(load_json(pi / "mcp.json"), str(cli), arguments),
+        pi / "mcp.json": cutover_owned_legacy_json(
+            add_server(pi_config, str(cli), arguments), "mcpServers", str(cli), root, profiles),
         pi / "settings.json": add_extension(load_json(pi / "settings.json"), str(wrapper)),
     }
     if claude:
-        claude_registered = claude_server_present(load_json(claude / ".claude.json"), str(cli), arguments)
+        claude_native_config = load_json(claude / ".claude.json")
+        owned_legacy["claude"] = plan_owned_legacy(
+            claude_native_config, "mcpServers", str(cli), root, profiles)
+        claude_registered = claude_server_present(claude_native_config, str(cli), arguments)
         updates[claude / "settings.json"] = add_hook(load_json(claude / "settings.json"), commands["claude"])
     plan = {"status": "plan", "store": str(root), "source": str(source),
             "config_files": [str(p) for p in paths], "skill": str(skill_link),
-            "pi_extension": str(wrapper), "mcp_name": NAME}
+            "pi_extension": str(wrapper), "mcp_name": NAME,
+            "owned_legacy": owned_legacy,
+            "cutover_boundary": "Only exact old shared-memory-dreaming registrations; native memories and all unrelated entries are retained."}
     if claude:
         plan.update(claude_dir=str(claude), claude_hook={"command": commands["claude"],
             "matcher": "startup|resume|clear|compact"},
@@ -286,6 +364,29 @@ def main() -> int:
                            capture_output=True, timeout=20)
         if not claude_server_present(load_json(native_path), str(cli), arguments):
             raise ValueError("Native Claude did not persist the owned MCP entry")
+    # Remove an older second registration only after the common entry and hooks
+    # are installed and exact ownership is checked again. No guessed cleanup.
+    if owned_legacy["codex"]["owned"]:
+        current = tomllib.loads((home / "config.toml").read_text())
+        require_active_common(current.get("mcp_servers", {}).get(NAME), str(cli), arguments)
+        if plan_owned_legacy(current, "mcp_servers", str(cli), root, profiles) != owned_legacy["codex"]:
+            raise ValueError("Codex legacy registration changed before owned cutover")
+        subprocess.run(["codex", "mcp", "remove", LEGACY_NAME],
+                       env=dict(os.environ, CODEX_HOME=str(home)), check=True,
+                       capture_output=True, timeout=20)
+        if LEGACY_NAME in tomllib.loads((home / "config.toml").read_text()).get("mcp_servers", {}):
+            raise ValueError("Codex legacy registration was not removed")
+    if claude and owned_legacy["claude"]["owned"]:
+        current = load_json(native_path)
+        if not claude_server_present(current, str(cli), arguments):
+            raise ValueError("Expected the exact active Claude shared-memory MCP entry before cutover")
+        if plan_owned_legacy(current, "mcpServers", str(cli), root, profiles) != owned_legacy["claude"]:
+            raise ValueError("Claude legacy registration changed before owned cutover")
+        subprocess.run(["claude", "mcp", "remove", "--scope", "user", LEGACY_NAME],
+                       env=dict(os.environ, CLAUDE_CONFIG_DIR=str(claude)), check=True,
+                       capture_output=True, timeout=20)
+        if LEGACY_NAME in load_json(native_path).get("mcpServers", {}):
+            raise ValueError("Claude legacy registration was not removed")
     atomic_text(root / ".gitignore", "/.venv/\n/.state/\n/.writer-gate.sqlite3*\n") if not (root / ".gitignore").exists() else None
     print(json.dumps({**plan, "status": "installed", "backup": str(backup),
                       "codex_hook": trust}, ensure_ascii=False, indent=2))

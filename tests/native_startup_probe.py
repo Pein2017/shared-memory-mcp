@@ -236,7 +236,7 @@ def summarize(result, requests, receipt, harness, cwd):
                 and request.get('workflow_reminder_present',False)]
     names = {name.rsplit('__',1)[-1] for request in matching for name in request['memory_tools']}
     verified_receipts = [entry for entry in result['native_hook_receipts'] if entry['exit_code']==0 and entry['sentinel_present'] and entry['record_id_present']
-                     and entry['text_chars']<=6000 and entry.get('hook_event_name')=='SessionStart'
+                     and entry['text_chars']<=6000 and entry.get('serialized_bytes', 8001)<=8000 and entry.get('hook_event_name')=='SessionStart'
                      and entry.get('source')=='startup' and entry.get('session_id')
                      and entry.get('cwd')==str(cwd)]
     native_ok = True
@@ -263,14 +263,10 @@ def main():
     project, store = run_root/'project', run_root/'memory'
     project.mkdir()
     env = environment(run_root)
-    for command in (['git','init','-q',str(project)],['git','-C',str(project),'config','user.name','Native Fixture'],
-                    ['git','-C',str(project),'config','user.email','fixture@example.invalid']):
-        require(command,run_root,env)
     (project/'fixture-owner.md').write_text('Synthetic fixture only. No scientific claim.\n')
-    require(['git','-C',str(project),'add','fixture-owner.md'],run_root,env)
-    require(['git','-C',str(project),'commit','-qm','Synthetic native startup fixture'],run_root,env)
-    worktree = run_root/'linked-worktree'
-    require(['git','-C',str(project),'worktree','add','--detach','-q',str(worktree)],run_root,env)
+    # Request-boundary qualification needs no Git repository, commit or linked checkout.
+    worktree = project/'consumer'
+    worktree.mkdir()
     for command in ([CLI,'--root',str(store),'init'],[CLI,'--root',str(store),'register','--project-id','native-fixture','--project-root',str(project)]):
         require(command,run_root,env)
     sentinel = 'NATIVE_MEMORY_'+uuid.uuid4().hex
@@ -278,7 +274,7 @@ def main():
     seed_path = run_root/'seed.json'
     seed_path.write_text(json.dumps(seed_options))
     seeded = json.loads(require([RUNTIME,str(HELPER),'seed',str(seed_path)],run_root,env)['stdout'])
-    report = {'run_root':str(run_root),'actual_cli':CLI,'project':str(project),'linked_worktree':str(worktree),
+    report = {'run_root':str(run_root),'actual_cli':CLI,'project':str(project),'consumer_cwd':str(worktree),
               'store':str(store),'sentinel':sentinel,'record_id':seeded['id'],'seed':seeded,'harnesses':{},
               'supported_harnesses':['codex','pi','claude'],'historical_harnesses':{}}
     previous_path = output/'native-startup-probe.json'
@@ -368,7 +364,7 @@ tool_timeout_sec = 15
                 (home/'hooks.json').write_text(json.dumps({'hooks':{'SessionStart':[{'matcher':'startup|resume|clear|compact',
                     'hooks':[{'type':'command','command':hook_command,'timeout':20}]}]}}))
                 report['codex_hook_trust'] = codex_trust(binary,home,worktree,native_env)
-                command = [binary,'exec','--json','--ephemeral','--ignore-rules','--cd',str(worktree),
+                command = [binary,'exec','--json','--ephemeral','--ignore-rules','--skip-git-repo-check','--cd',str(worktree),
                            'Synthetic startup probe. Do not run tools.']
             result = run(command,worktree,native_env)
             for stream in ('stdout','stderr'):

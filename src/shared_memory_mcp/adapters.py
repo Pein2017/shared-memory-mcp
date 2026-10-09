@@ -36,35 +36,39 @@ def _caller(harness: str, event: Any) -> dict[str, str]:
 
 
 def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
-                max_chars: int = 6000, dream_profile: str | None = None,
-                dream_scenario: str = 'general') -> dict[str, Any]:
+                max_chars: int = 6000, max_bytes: int = 8000) -> dict[str, Any]:
     """Translate only the actual native cwd/session; never use process cwd."""
     caller = _caller(harness, event)
-    result = store.context(caller, limit=limit, max_chars=max_chars)
-    if dream_profile:
-        from .dream_transport import append_startup_collaboration
-        result = append_startup_collaboration(store, caller, result, dream_profile,
-                                               dream_scenario, max_chars=max_chars)
+    result = store.context(caller, limit=limit, max_chars=max_chars, max_bytes=max_bytes)
     if not isinstance(result, dict) or result.get("status") != "ok":
         info = result.get("diagnostic") if isinstance(result, dict) else None
         hint = info.get("onboarding") if isinstance(info, dict) else None
         if (isinstance(hint, str) and hint.startswith('Shared-memory onboarding diagnostic:')
                 and len(hint) <= max_chars and '<shared-memory-context>' not in hint):
-            return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": hint}}
+            diagnostic = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": hint}}
+            if len(json.dumps(diagnostic, ensure_ascii=False).encode('utf-8')) <= max_bytes:
+                return diagnostic
         status = result.get("status") if isinstance(result, dict) else None
         raise AdapterInputError("Core could not resolve context",
-                                status if status in ("unmapped", "ambiguous", "invalid") else "invalid_context_output")
+                                status if status in ("unmapped", "ambiguous", "invalid", "budget-limited") else "invalid_context_output")
+    exposed = result.get('caller_context', {})
+    if (result.get('packet_version') != 1 or any(exposed.get(k) != caller[k] for k in ('cwd', 'harness', 'session_id', 'actor'))
+            or result.get('scope', {}).get('cwd') != caller['cwd'] or not exposed.get('project_id')
+            or exposed.get('project_id') != result.get('scope', {}).get('project_id')):
+        raise AdapterInputError('Core returned another caller or an unsupported packet', 'invalid_context_scope')
     text = result.get("text") if isinstance(result, dict) else None
     if not isinstance(text, str) or len(text) > max_chars:
         raise AdapterInputError("Core returned invalid or oversized context")
     if not text:
         return {}
-    return {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+    output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
+    if len(json.dumps(output, ensure_ascii=False).encode('utf-8')) > max_bytes:
+        raise AdapterInputError('Serialized native context exceeds its byte cap', 'context_budget')
+    return output
 
 
 def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
-              stdout: TextIO | None = None, stderr: TextIO | None = None,
-              dream_profile: str | None = None, dream_scenario: str = 'general') -> int:
+              stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
     """Emit host JSON; errors inject no memory and remain advisory to the host."""
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
@@ -77,7 +81,7 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
             event = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             raise AdapterInputError("Hook stdin must be a JSON event") from exc
-        output = handle_hook(store, harness, event, dream_profile=dream_profile, dream_scenario=dream_scenario)
+        output = handle_hook(store, harness, event)
     except Exception as exc:
         # Do not echo raw native input, transcript paths, credentials, or records.
         code = getattr(exc, "code", "adapter_error")

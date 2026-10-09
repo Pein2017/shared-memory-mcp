@@ -27,6 +27,11 @@ async def seed(options):
             identifier = proposed['record']['id']
             unpack(await session.call_tool('approve',{'context':context,'id':identifier,
                 'review':{'reason':'Synthetic test fixture only','evidence':[source]},'idempotency_key':'native-promote'}))
+            unpack(await session.call_tool('curate', {'context': context, 'id': identifier,
+                'review': {'reason': 'Reviewed synthetic compact background', 'evidence': [source]},
+                'idempotency_key': 'native-background', 'details': {
+                    'summary': options['sentinel'], 'conditions': 'Synthetic fixture only; no scientific support.',
+                    'extensions': {'narrative': {'id': 'native.background', 'role': 'background', 'compact': options['sentinel']}}}}))
             routing = Path(options['root']) / 'routing'
             routing.mkdir(exist_ok=True)
             (routing / (proposed['record']['project_id'] + '.json')).write_text(json.dumps({
@@ -34,7 +39,9 @@ async def seed(options):
                 'topics': [{'id': 'fixture', 'title': options['sentinel'], 'when': 'During this isolated test.',
                             'sources': [source], 'memory_ids': [identifier]}]}))
             nav = unpack(await session.call_tool('context',{'context':context}))
-            assert nav['records_not_loaded'] and nav['items'] == [] and 'text' not in nav
+            assert nav['packet_version'] == 1 and not nav['records_not_loaded']
+            assert any(item['id'] == identifier for item in nav['items']) and options['sentinel'] in nav['text']
+            assert 'Synthetic fixture only' in nav['text']
             cli_context = subprocess.run([options['cli'],'--root',options['root'],'context',
                                          '--cwd',context['cwd'],'--harness',context['harness'],
                                          '--session-id',context['session_id'],'--actor',context['actor']],
@@ -55,6 +62,7 @@ def hook(options):
     text = output.get('hookSpecificOutput',{}).get('additionalContext','')
     receipt = {key:event.get(key) for key in ('cwd','session_id','hook_event_name','source')}
     receipt.update(exit_code=result.returncode,text_chars=len(text),
+                   serialized_bytes=len(result.stdout.encode('utf-8')),
                    sentinel_present=options['sentinel'] in text,record_id_present=options['id'] in text)
     with open(options['receipt'],'a') as stream:
         stream.write(json.dumps(receipt)+'\n')

@@ -6,13 +6,14 @@ A curation journal is not independent evidence or an authorization database.
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 
 from .core import (HARNESSES, MAX_RECORD_BYTES, MAX_RECORDS, RECORD_ID, SAFE_ID,
                    MemoryError, _decode, _digest, _fail, _json, _keys,
                    _nonempty, _now, _sources, _utc)
 
 DETAIL_FIELDS = {'summary', 'conditions', 'domain', 'topics', 'aliases', 'share_with',
-                 'statement_type', 'observed_at', 'source_roles', 'relations', 'extensions'}
+                 'statement_type', 'observed_at', 'source_roles', 'relations', 'extensions', 'task_modes'}
 STATEMENT_TYPES = {'observation', 'experiment', 'result', 'interpretation', 'hypothesis',
                    'user_decision', 'engineering_lesson', 'reference'}
 SOURCE_ROLES = {'owner', 'evidence', 'derivative', 'origin'}
@@ -68,6 +69,10 @@ def validate_details(details, record, project_ids):
             _fail('invalid_input', 'Sharing targets must be other registered projects')
     if 'statement_type' in details and (not isinstance(details['statement_type'], str) or details['statement_type'] not in STATEMENT_TYPES):
         _fail('invalid_input', 'Unsupported statement_type')
+    if 'task_modes' in details:
+        modes = details['task_modes']
+        if not isinstance(modes, list) or not modes or len(modes) > 2 or any(x not in {'research', 'general'} for x in modes) or len(set(modes)) != len(modes):
+            _fail('invalid_input', 'task_modes requires one or both distinct supported modes')
     if 'observed_at' in details:
         _utc(details['observed_at'])
     if 'source_roles' in details:
@@ -93,6 +98,9 @@ def validate_details(details, record, project_ids):
             _sources([{'uri': item['uri']}])
     if 'extensions' in details and not isinstance(details['extensions'], dict):
         _fail('invalid_input', 'extensions must be an optional JSON object')
+    if 'narrative' in details.get('extensions', {}):
+        from .narrative import validate
+        validate(details['extensions']['narrative'])
     try:
         if len(_json(details).encode('utf-8')) > 32768:
             _fail('invalid_input', 'details exceed the metadata bound')
@@ -109,7 +117,7 @@ def validate_review(review):
 
 def journals(store, project_id, records):
     """Validate before applying any metadata, including all operation identities."""
-    directory = safe_path(store, Path('curation') / project_id)
+    directory = store.collection_directory(project_id, 'curation')
     by_id = {r['id']: r for r in records}
     project_ids = {p['id'] for p in store._registry()['projects']}
     result, operations = {}, {}
@@ -176,6 +184,12 @@ def projected_records(store, project_id):
         if r['recall_retired'] and r['effective_status'] == 'active':
             r['effective_status'] = 'retired'
         result.append(r)
+    # Explicit narrative record replacements use the same no-revival rule as successors.
+    from .narrative import replacements
+    replaced, _ = replacements(store, project_id, result)
+    for r in result:
+        if (store._qualifier(r), 'record:' + r['id']) in replaced and r['effective_status'] == 'active':
+            r['effective_status'] = 'superseded'
     return result
 
 
@@ -212,7 +226,16 @@ def curate(store, context, id, review, idempotency_key, details=None, retired=No
         if expected_revision is not None and expected_revision != current['curation_revision']:
             _fail('stale_curation', 'Curation changed since the previous read')
         merged = {**current['details'], **details}
+        old_extensions = current['details'].get('extensions', {})
+        new_extensions = merged.get('extensions', {})
+        if capture_digest is None and new_extensions.get('live_review') != old_extensions.get('live_review'):
+            _fail('immutable_assurance', 'Live provenance is created only by reviewed current-message capture')
+        if r['status'] == 'active' and old_extensions.get('narrative', {}).get('replaces') != new_extensions.get('narrative', {}).get('replaces'):
+            _fail('immutable_correction', 'Publish a successor rather than changing accepted replacement links')
         validate_details(merged, r, {p['id'] for p in store._registry()['projects']})
+        if r['status'] == 'candidate':
+            from .narrative import check_replacements
+            check_replacements(store, scope, r, merged, context=context)
         events = current['curation_audit']
         request['previous'] = events[-1]['digest'] if events else 'start'
         event = {'key': idempotency_key, 'digest': _digest(request), 'payload': request, 'at': _now()}
@@ -220,16 +243,21 @@ def curate(store, context, id, review, idempotency_key, details=None, retired=No
         data = (_json(doc) + '\n').encode('utf-8')
         if len(data) > MAX_RECORD_BYTES or len(doc['events']) > 512:
             _fail('curation_limit', 'Curation journal exceeds its explicit local bound')
-        path = safe_path(store, Path('curation') / scope['project_id'] / (id + '.json'))
+        path = store.collection_directory(scope['project_id'], 'curation') / (id + '.json')
         store._publish(path, data)
         return {'status': 'ok', 'id': id, 'curation_revision': _digest(doc), 'replayed': False}
 
 
-def capture(store, context, record, idempotency_key, review=None, details=None):
+def capture(store, context, record, idempotency_key, review=None, details=None, *, live_correction=None):
     """Replayable admission: interrupted calls leave a candidate, never an implicit review."""
     store._record_input(record)
     _nonempty(idempotency_key, 'idempotency_key')
-    details = {} if details is None else details
+    record, review = deepcopy(record), deepcopy(review)
+    details = {} if details is None else deepcopy(details)
+    if 'live_review' in details.get('extensions', {}):
+        _fail('invalid_assurance', 'Supply live_correction, not manufactured live-review metadata')
+    if live_correction is not None and review is None:
+        _fail('pending_review', 'A direct current-message correction requires foreground review')
     if review is not None:
         validate_review(review)
     with store._gate():
@@ -241,9 +269,28 @@ def capture(store, context, record, idempotency_key, review=None, details=None):
         digest = _digest({'context': context, 'record': record, 'review': review, 'details': details})
         # Bind the entire call before the first candidate can become visible.
         # The existing proposal only binds context/record, not review/details.
-        relative = Path('capture') / scope['project_id'] / (_digest(idempotency_key) + '.json')
+        relative = (store.collection_directory(scope['project_id'], 'capture') / (_digest(idempotency_key) + '.json')).relative_to(store.root)
+        if live_correction is not None:
+            digest = _digest({'context': context, 'record': record, 'review': review, 'details': details,
+                              'live_correction': live_correction})
         expected = {'version': 1, 'project_id': scope['project_id'], 'key': idempotency_key, 'digest': digest}
         existing = read_json(store, relative)
+        if live_correction is not None:
+            from .narrative import live_review, live_source
+            when = (existing or {}).get('live_review', {}).get('reviewed_at', _now())
+            basis = live_review(context, scope, record, live_correction, reviewed_at=when)
+            expected['live_review'] = basis
+            details.setdefault('extensions', {})['live_review'] = basis
+            source = live_source(basis)
+            if source not in record['sources']:
+                record['sources'].append(source)
+            if source not in review['evidence']:
+                review['evidence'].append(source)
+            store._record_input(record)
+        from .narrative import check_replacements
+        # Replays recover their original binding; fresh publication rechecks at promotion.
+        if existing is None:
+            check_replacements(store, scope, record, details, context=context)
         has_receipt = safe_path(store, relative).exists()
         if has_receipt:
             _keys(existing, set(expected), set(expected), 'capture receipt')

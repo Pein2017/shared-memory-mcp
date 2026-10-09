@@ -1,6 +1,6 @@
 # OpenSpec entry and reconciliation
 
-## Receiving implementation session
+## Active source implementation and retained reconciliation
 
 The only active change is [evolve-task-aware-shared-memory](changes/evolve-task-aware-shared-memory/proposal.md).
 Read its [design](changes/evolve-task-aware-shared-memory/design.md), capability deltas under `specs/`, then [tasks](changes/evolve-task-aware-shared-memory/tasks.md).
@@ -8,7 +8,7 @@ The target is Agent-oriented continuity: one shared-memory integration, ordinary
 
 `openspec/specs/` records the reconciled implemented baseline. The active change's explicit deltas define the intended successor; do not mistake the baseline's routing-only startup or separate Dreaming connection for target requirements. Promote the successor only after its implementation and declared technical acceptance. Planning completion is not implementation completion.
 
-This 2026-10-08 pass changes documentation and archives completed work only. The user will transfer implementation to another web-codex session. It does not run another pilot, write memory, install/reload clients, launch historical ingestion, invoke paid models, commit or push. The receiving session uses its own current authorization and caller identity; historical grants do not transfer.
+The 2026-10-08 reconciliation pass changed only documentation and archived earlier work; that historical statement does not describe the newer source implementation. The separately authorized 2026-10-08 to 2026-10-09 work implemented the active successor in the existing checkout, preserving dirty work. Its [technical acceptance](changes/evolve-task-aware-shared-memory/acceptance.md) and [reviewable rollout plan](changes/evolve-task-aware-shared-memory/rollout-plan.md) distinguish tested source/consumers from unperformed production installation and historical bootstrap. No new model, production-memory write, live installation/reload, service restart, Git commit or push is authorized by this documentation.
 
 ## Reconciled baseline
 
@@ -45,8 +45,23 @@ Dreaming's unqualified automatic work-session delivery and broader history cover
 
 ## Validation and handoff boundary
 
-Use `openspec list`, `openspec status --change evolve-task-aware-shared-memory`, and `openspec validate --all --strict --no-interactive` from this repository. There should be one active planned change, ten baseline capabilities, and no checked implementation tasks in the successor. Its two new capabilities are historical review and the configured CoordExp research lens.
+Use `openspec list`, `openspec status --change evolve-task-aware-shared-memory`, and `openspec validate --all --strict --no-interactive` from this repository. The one active change has ten reconciled baseline capabilities and nine successor deltas, including the new historical review and configured CoordExp research lens. Current [tasks](changes/evolve-task-aware-shared-memory/tasks.md) record 37 source-implementation tasks checked with evidence and task 8.2 still pending: a first historical batch's exact native event selections and full deduplication preflight require a separately authorized bounded historical inventory. The change has not been installed or archived as a completed production rollout.
 
-Reconciliation checks passed on 2026-10-08: strict validation of all ten baseline specs plus the active change (11/11), archived completion (7/7), and a disposable projection of all nine deltas onto the baseline (12/12 resulting capabilities). Every inherited scenario in a MODIFIED requirement was retained. Maintained Markdown links and whitespace checks passed. Independent review found no remaining contradiction in the named startup, unified-entrypoint, freshness/access, Pi-budget or execution-scope boundaries. All 43 moved historical files and 12 pre-existing source/test edits matched their pre-reconciliation bytes. These are document/structure checks, not new runtime acceptance.
+Initial reconciliation checks passed on 2026-10-08, before the cross-review refinements below: strict validation of all ten baseline specs plus the active change (11/11), archived completion (7/7), and a disposable projection of all nine deltas onto the baseline (12/12 resulting capabilities). Every inherited scenario in a MODIFIED requirement was retained. Maintained Markdown links and whitespace checks passed. Independent review found no remaining contradiction in the named startup, unified-entrypoint, freshness/access, Pi-budget or execution-scope boundaries. All 43 moved historical files and 12 pre-existing source/test edits matched their pre-reconciliation bytes. These are document/structure checks, not new runtime acceptance.
 
 The old [content pilot](changes/evolve-task-aware-shared-memory/pilot.md) is retained as dated diagnostic evidence only. Its actions are not implementation tasks completed by this reconciliation and are not permission to repeat the pilot. The latest agreed freshness behavior is in the successor design/specs, not that pilot's earlier requirement draft.
+
+
+## Cross-review refinements for implementation
+
+The user supplied a WebCodex review after initial reconciliation. Source inspection confirmed that WebCodex `context_projection.rs` writes tool output, that live ordinary review and historical Dreaming attribution have different evidence contracts, and that Dreaming's start predicate does not consult the pending-review count retained by close. These are source findings, not new runtime reproductions. The existing change is revised in place; there is no second design/change owner.
+
+The implementation package adopts these bounded resolutions:
+
+- WebCodex automatically carries shared background in its normal work_on_project and explicit exact-session resume result. Qualify final public serialization. Host final model-request presentation is separately observable/unverified; no pre-first-call injection is promised.
+- Direct live corrections use disclosed cooperative Agent review within existing grants, including honest missing-history provenance. This is a deliberate trust choice, not operator authentication. Historical/quoted/delegated/ambiguous messages cannot use that path; historical personal attribution retains its stronger evidence requirements.
+- A few stable scoped narrative units connect ordinary corrections to source-only/cached views. Reviewed compact renditions make default context useful; changed source bytes, explicit correction and revoked access have distinct effects.
+- Review objectives bind semantic continuation in the existing Run/checkpoint model. Pending review and a new question over unchanged sources remain actionable. Changing objectives cannot bypass a live lane or source-use prohibitions.
+- Research/general is a soft evidence ranking/presentation preference. Explicitly scoped personal preferences still obey their applicability conditions.
+
+The implementation followed ordinary scoped correction -> precise source-only overview replacement -> useful compact context -> native consumer, then addressed Dreaming, all four consumer boundaries and owned-cutover fixtures. The [acceptance matrix](changes/evolve-task-aware-shared-memory/acceptance.md) pairs checked tasks with RED/GREEN and native/Server results; 8.2 remains explicit pending work. Strict OpenSpec validates requirements, not deployment or model-quality gains. The subsequently authorized local Codex/Pi configuration activation and production readback are recorded in the acceptance receipt. The subsequent separately authorized local WebCodex deployment and external MCP read checks are recorded in the same receipt; its oversized automatic startup overview remains budget-limited. Historical source backfill and paid-model comparison remain unexecuted.
