@@ -3,9 +3,7 @@
 ## Purpose
 
 Let an authorized agent identify and register the repository it is actually working in while preserving project isolation and actionable native diagnostics.
-
 ## Requirements
-
 ### Requirement: Read-only actionable project discovery
 Project discovery and memory read operations SHALL identify actual cwd/Git bindings without registering projects or modifying knowledge. An unregistered independent Git repository SHALL expose a bounded reason and a valid existing registration invocation when unambiguous; unknown scope SHALL expose no project memory. Diagnostics SHALL NOT echo raw session inputs or credentials.
 
@@ -25,7 +23,7 @@ An authorized agent SHALL be able to register its verified task repository throu
 - **THEN** it reuses the permitted identity or explains the restriction without creating a broader binding
 
 ### Requirement: Native diagnostics retain onboarding information
-Native adapters SHALL preserve a bounded actionable onboarding diagnostic at failed scope resolution while injecting no foreign project memory. Successful startup SHALL retain the established stable navigation behavior.
+Native adapters SHALL preserve a bounded actionable onboarding diagnostic at failed scope resolution while injecting no foreign project memory. Successful startup SHALL use the content-bearing scoped contract in shared-memory-recall while keeping actionable diagnostics separate from untrusted knowledge.
 
 #### Scenario: Unregistered native startup
 - **WHEN** a valid native session starts in an unregistered independent repository

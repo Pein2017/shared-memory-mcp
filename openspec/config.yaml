@@ -14,10 +14,10 @@ context: |
   Memory publication is neither scientific proof nor execution authority.
   No daemon, automatic transcript extraction, scheduler, background model calls,
   mandatory embeddings or new memory Git repository is required.
-  openspec/specs is the reconciled implemented baseline. The sole next-version
-  change is evolve-task-aware-shared-memory; its proposal, design, deltas and
-  tasks own the agreed target. Archived dated profiles and model-specific
-  qualification commands are historical evidence, not new execution grants.
+  openspec/specs is the current reconciled implemented behavior contract after
+  the 2026-10-09 task-aware successor archive. No OpenSpec change is active.
+  Historical deltas and model-specific qualification receipts are evidence,
+  not new execution grants; first historical batch 8.2 was withdrawn.
   The target provides one MCP entrypoint for ordinary Agent maintenance and
   manually requested Dreaming, bounded content-bearing context, foreground
   research/general mode selection and source-linked as-of project understanding.
@@ -25,6 +25,6 @@ context: |
   require relevant current-owner checks by the foreground Agent. Access
   revocation and explicit withdrawal still deny affected content.
   Keep one bundled shared-memory skill through the existing shared skill entry.
-  This reconciliation is documentation and archival only. Implementation belongs
-  to the user's receiving session. Live installation, production memory writes,
-  historical bootstrap and paid model calls require their applicable task scope.
+  Archival is documentation/contract maintenance only, not a memory operation.
+  Any subsequent live installation, production-memory write, history batch,
+  service change or paid model call requires independent task authority.

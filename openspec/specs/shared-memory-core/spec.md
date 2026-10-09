@@ -3,9 +3,7 @@
 ## Purpose
 
 Provide auditable shared Markdown knowledge with explicit provenance, scoped applicability, validated lifecycle transitions, and reliable local concurrent access, retaining legacy records without admitting new handoff snapshots.
-
 ## Requirements
-
 ### Requirement: Canonical portable records
 The system SHALL store each canonical record in one UTF-8 Markdown file with versioned fenced JSON metadata and a readable body. It SHALL preserve ID, kind, scope, origin, source references, timestamps, and review provenance. Native harness memory and formal research records SHALL remain independent.
 
@@ -85,11 +83,11 @@ The system SHALL supersede knowledge by accepting a successor with explicit pred
 - **THEN** default recall includes neither the expired successor nor its superseded predecessor
 
 ### Requirement: Explicit expiry and progressive recall
-Default record recall SHALL include only applicable active, nonexpired, nonsuperseded records. Empty-query startup SHALL follow the navigation contract in shared-memory-recall; task-known search SHALL return bounded cards before full reads. Startup output SHALL obey its total character and entry budgets and report omissions. Memory SHALL be presented as contextual data, not instructions overriding user or project authority.
+Default record recall SHALL include only applicable active, nonexpired, nonsuperseded records. Empty-query startup SHALL deliver eligible preferences and project understanding under shared-memory-recall; task-known search SHALL retain bounded cards before full reads. Context SHALL use that capability's one combined serialized budget, preserve whole qualified units, report omissions and provide detail continuation. Memory SHALL be presented as contextual data, not instructions overriding user or project authority.
 
 #### Scenario: Budget includes metadata
-- **WHEN** a context request sets a small supported character budget
-- **THEN** the complete emitted text including wrapper and source/status information remains within it, or the operation reports a context-budget error and the native adapter supplies no recalled text
+- **WHEN** a context request sets a small supported serialized budget
+- **THEN** the complete emitted text including wrapper and source/status information remains within it, or the operation returns an explicit bounded budget diagnostic without misleading empty-success content
 
 #### Scenario: Large search matches remain bounded
 - **WHEN** matching records contain large bodies or extensive source/provenance metadata
