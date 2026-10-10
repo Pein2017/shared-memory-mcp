@@ -9,13 +9,34 @@ const onboardingType = "shared-memory-onboarding";
 const ownedTypes = new Set([bootstrapType, taskType, onboardingType]);
 const byteLimit = 8000;
 const maxChars = 6000;
-const toolPattern = /^mcp__(?:shared_memory|shared-memory)__(context|capture|approve|update|delete|curate|draft_publish)$/;
+const operations = new Set(["context", "create", "capture", "approve", "update", "delete", "curate", "draft_publish"]);
+const toolPattern = /^(?:mcp__(?:shared_memory|shared-memory)__|(?:shared_memory|shared-memory)_)([a-z_]+)$/;
+const servers = new Set(["shared-memory", "shared_memory"]);
+type ToolIdentity = { toolName: string; details?: unknown };
+function operationIdentity(value: ToolIdentity): { operation: string; valid: boolean } | null {
+  const direct = toolPattern.exec(value.toolName)?.[1];
+  const details = value.details as { server?: unknown; tool?: unknown; mode?: unknown } | undefined;
+  if (direct && operations.has(direct)) {
+    // Metadata may supplement a direct name but may not contradict it.
+    return { operation: direct, valid: (details?.server === undefined || typeof details.server === "string" && servers.has(details.server))
+      && (details?.tool === undefined || details.tool === direct) };
+  }
+  if (!["mcp", "mcp__shared_memory", "mcp__shared-memory"].includes(value.toolName)
+      || typeof details?.server !== "string" || !servers.has(details.server)
+      || typeof details.tool !== "string" || !operations.has(details.tool)
+      || (details.mode !== undefined && details.mode !== "call")) return null;
+  return { operation: details.tool, valid: true };
+}
+function failed(value: { isError?: boolean; details?: unknown }): boolean {
+  const details = value.details as { error?: unknown; isError?: boolean } | undefined;
+  return Boolean(value.isError || details?.isError || details?.error);
+}
 type Binding = { task_mode: "research" | "general" | null; query: string; current_status?: boolean };
 type Packet = { status: string; packet_version?: number; packet_revision?: string; text: string;
-  caller_context?: { cwd: string; harness: string; session_id: string; project_id: string };
+  caller_context?: { cwd: string; harness: string; session_id: string; project_id: string; actor?: string };
   scope?: { cwd: string; project_id: string }; binding?: Binding; unchanged?: boolean;
   parts?: { kind: "bootstrap" | "task"; start: number; end: number; revision: string }[];
-  part_offset_unit?: string; diagnostic?: { onboarding?: string } };
+  part_offset_unit?: string; diagnostic?: { onboarding?: string }; continuation?: unknown };
 type OwnedPart = { content: string; timestamp: number; customType: string };
 
 function diagnostic(code: string): void {
@@ -27,7 +48,7 @@ function runContext(command: string, args: string[]): Promise<Packet> {
     execFile(command, args, { timeout: 15000, maxBuffer: 131072, encoding: "utf8" }, (error, stdout) => {
       try {
         const result = JSON.parse(stdout);
-        if (error && result.status === "ok") throw new Error("context_command_failed");
+        if (error || !result || typeof result !== "object") throw new Error("context_command_failed");
         resolve(result);
       } catch { reject(new Error("invalid_context_output")); }
     });
@@ -47,6 +68,18 @@ function packetFrom(content: unknown): Packet | null {
   return packets.length === 1 ? packets[0] : null;
 }
 
+function isReceipt(content: unknown): boolean {
+  if (!Array.isArray(content) || content.length !== 1 || content[0]?.type !== "text") return false;
+  try {
+    const value = JSON.parse(content[0].text);
+    return value && typeof value.shared_memory_receipt === "string"
+      && Object.keys(value).every(k => ["shared_memory_receipt", "delivery", "reason", "continuation"].includes(k))
+      && (value.delivery === "current ephemeral packet; not another full copy"
+          || value.reason === "context_call_failed_or_scope_mismatch" || value.reason === "context_budget")
+      && !content[0].text.includes("<shared-memory-") && Buffer.byteLength(content[0].text) < 2048;
+  } catch { return false; }
+}
+
 export interface SharedMemoryOptions { root?: string; cli?: string }
 
 export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
@@ -56,9 +89,12 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
     let generation = 0;
     let binding: Binding = { task_mode: null, query: "" };
     let recoverBinding = false;
+    let revision = "";
     const handled = new Set<string>();
+    const failedCalls = new Set<string>();
     const key = (ctx: ExtensionContext) => JSON.stringify([ctx.cwd, ctx.sessionManager.getSessionId()]);
-    const validIdentity = (packet: Packet, ctx: ExtensionContext) => packet.packet_version === 1
+    const validIdentity = (packet: Packet, ctx: ExtensionContext) => packet?.packet_version === 1
+      && isAbsolute(ctx.cwd) && Boolean(ctx.sessionManager.getSessionId()?.trim())
       && packet.caller_context?.cwd === ctx.cwd && packet.caller_context?.harness === "pi"
       && packet.caller_context?.session_id === ctx.sessionManager.getSessionId()
       && typeof packet.scope?.project_id === "string" && packet.scope.project_id.length > 0
@@ -71,21 +107,26 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
       return { task_mode: value.task_mode, query: value.query,
         ...(value.current_status ? { current_status: true } : {}) };
     }
-    function accept(packet: Packet, ctx: ExtensionContext): void {
+    function accept(packet: Packet, ctx: ExtensionContext, allowOnboarding = false): void {
       const old = parts;
       parts = [];
-      const hint = packet.diagnostic?.onboarding;
-      if (["unmapped", "ambiguous", "invalid"].includes(packet.status) && typeof hint === "string"
+      const hint = packet?.diagnostic?.onboarding;
+      if (allowOnboarding && ["unmapped", "ambiguous", "invalid"].includes(packet.status) && typeof hint === "string"
           && hint.startsWith("Shared-memory onboarding diagnostic:") && !hint.includes("<shared-memory-context>")
           && Array.from(hint).length <= maxChars && Buffer.byteLength(JSON.stringify(hint)) < byteLimit - 256) {
         parts = [{ content: hint, timestamp: Date.now(), customType: onboardingType }];
         return;
       }
       if (!validIdentity(packet, ctx) || packet.status !== "ok") throw new Error("invalid_context_scope_or_status");
-      binding = validateBinding(packet.binding);
-      if (packet.unchanged) { parts = old; return; }
-      if (typeof packet.text !== "string" || Array.from(packet.text).length > maxChars
+      const nextBinding = validateBinding(packet.binding);
+      if (typeof packet.packet_revision !== "string" || !packet.packet_revision
+          || typeof packet.text !== "string" || Array.from(packet.text).length > maxChars
           || Buffer.byteLength(JSON.stringify(packet), "utf8") > byteLimit) throw new Error("context_budget");
+      if (packet.unchanged) {
+        if (!old.length || packet.text !== "" || revision !== packet.packet_revision
+            || JSON.stringify(binding) !== JSON.stringify(nextBinding)) throw new Error("invalid_unchanged_context");
+        parts = old; return;
+      }
       const characters = Array.from(packet.text);
       const ranges = packet.parts;
       if (!ranges || packet.part_offset_unit !== "unicode-codepoints" || ranges.length < 1 || ranges.length > 2
@@ -106,13 +147,15 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
       }
       if (Buffer.byteLength(JSON.stringify(next.map(p => ({ role: "custom", ...p, display: false })))) > byteLimit)
         throw new Error("context_budget");
+      binding = nextBinding;
+      revision = packet.packet_revision;
       parts = next;
     }
     async function refresh(ctx: ExtensionContext, forceUnbound = false): Promise<void> {
       const current = ++generation;
       const old = parts;
       parts = [];
-      if (identity !== key(ctx) || forceUnbound) { binding = { task_mode: null, query: "" }; handled.clear(); }
+      if (identity !== key(ctx) || forceUnbound) { binding = { task_mode: null, query: "" }; revision = ""; handled.clear(); failedCalls.clear(); }
       identity = key(ctx);
       const root = options.root ?? process.env.SHARED_MEMORY_ROOT;
       const sessionId = ctx.sessionManager.getSessionId();
@@ -127,7 +170,7 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
           ...(binding.query ? ["--query", binding.query] : []),
           ...(binding.current_status ? ["--current-status"] : []),
         ]);
-        if (current === generation) { parts = old; accept(packet, ctx); }
+        if (current === generation && identity === key(ctx)) { parts = old; accept(packet, ctx, true); }
       } catch (error) {
         if (current === generation) { parts = []; diagnostic(error instanceof Error ? error.message : "context_failed"); }
       }
@@ -135,17 +178,26 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
     pi.on("session_start", async (_event, ctx) => { recoverBinding = true; await refresh(ctx); });
     pi.on("session_compact", async (_event, ctx) => { recoverBinding = true; await refresh(ctx); });
     pi.on("tool_result", async (event, ctx) => {
-      const operation = toolPattern.exec(event.toolName)?.[1];
+      const operation = operationIdentity(event);
       if (!operation) return;
+      if (identity !== key(ctx)) {
+        binding = { task_mode: null, query: "" }; revision = ""; parts = []; handled.clear(); failedCalls.clear(); identity = key(ctx);
+      }
       handled.add(event.toolCallId);
-      if (handled.size > 2048) handled.delete(handled.values().next().value!);
-      if (operation === "context") {
+      if (handled.size > 2048) {
+        const oldest = handled.values().next().value!;
+        handled.delete(oldest); failedCalls.delete(oldest);
+      }
+      if (operation.operation === "context") {
+        ++generation; // A foreground result supersedes any in-flight lifecycle refresh.
+        recoverBinding = false;
         try {
           const packet = packetFrom(event.content);
-          if (event.isError || !packet) throw new Error("context_call_failed");
+          if (!operation.valid || failed(event) || !packet) throw new Error("context_call_failed");
           accept(packet, ctx);
-        } catch { parts = []; diagnostic("context_call_failed"); }
-      } else if (!event.isError) {
+          failedCalls.delete(event.toolCallId);
+        } catch { parts = []; revision = ""; failedCalls.add(event.toolCallId); diagnostic("context_call_failed"); }
+      } else if (operation.valid && !failed(event)) {
         await refresh(ctx);
       }
       // Native history retains the real tool output; the context projection below
@@ -155,37 +207,67 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
       if (identity !== key(ctx)) { recoverBinding = true; await refresh(ctx, true); }
       if (recoverBinding) {
         recoverBinding = false;
-        const packets = event.messages.filter(m => m.role === "toolResult" && toolPattern.exec(m.toolName)?.[1] === "context")
-          .map(m => ({ message: m, packet: packetFrom(m.content) })).filter(v => v.packet && validIdentity(v.packet, ctx));
-        const last = packets.at(-1);
-        if (last?.packet) {
-          try {
-            const recovered = validateBinding(last.packet.binding);
-            if (JSON.stringify(recovered) !== JSON.stringify(binding)) { binding = recovered; await refresh(ctx); }
-          } catch { binding = { task_mode: null, query: "" }; parts = []; }
-          for (const value of packets) if (value.message.role === "toolResult") handled.add(value.message.toolCallId);
+        const calls = event.messages.filter(m => m.role === "toolResult" && operationIdentity(m)?.operation === "context" && !isReceipt(m.content));
+        const last = calls.at(-1);
+        if (last?.role === "toolResult") {
+          const packet = packetFrom(last.content);
+          // A latest failure is a fence: never recover an older successful binding.
+          // Foreign-session history is redacted below, not adopted as this session's binding.
+          if (!packet || validIdentity(packet, ctx) || failedCalls.has(last.toolCallId)) {
+            try {
+              if (!operationIdentity(last)?.valid || failed(last) || !packet || !validIdentity(packet, ctx) || packet.status !== "ok")
+                throw new Error("context_call_failed");
+              const freshParts = parts, freshBinding = binding, freshRevision = revision;
+              accept(packet, ctx); // Validate budget, structure, scope and unchanged receipts too.
+              if (JSON.stringify(binding) !== JSON.stringify(freshBinding)) await refresh(ctx);
+              else { parts = freshParts; revision = freshRevision; }
+            } catch { binding = { task_mode: null, query: "" }; revision = ""; parts = []; failedCalls.add(last.toolCallId); }
+          }
+          for (const message of calls) if (message.role === "toolResult") handled.add(message.toolCallId);
         }
       }
+      const latestContext = event.messages.filter(m => m.role === "toolResult"
+        && operationIdentity(m)?.operation === "context" && !isReceipt(m.content)).at(-1);
       const messages = [];
       for (const message of event.messages) {
         if (message.role === "custom" && ownedTypes.has(message.customType)) continue;
-        if (message.role === "toolResult" && toolPattern.exec(message.toolName)?.[1] === "context") {
+        if (message.role === "toolResult" && operationIdentity(message)?.operation === "context") {
+          if (isReceipt(message.content)) { messages.push(message); continue; }
           const packet = packetFrom(message.content);
-          if (packet && !validIdentity(packet, ctx)) {
-            messages.push({ ...message, content: [{ type: "text" as const,
-              text: JSON.stringify({ shared_memory_receipt: "unavailable", reason: "caller_scope_mismatch" }) }], structuredContent: undefined });
-            continue;
-          }
-          if (packet && validIdentity(packet, ctx)) {
-            if (!handled.has(message.toolCallId)) {
-              handled.add(message.toolCallId);
-              try { accept(packet, ctx); } catch { parts = []; diagnostic("context_call_failed"); }
+          let valid = !failedCalls.has(message.toolCallId) && operationIdentity(message)?.valid && !failed(message) && packet
+            && validIdentity(packet, ctx) && packet.status === "ok";
+          if (!handled.has(message.toolCallId)) {
+            handled.add(message.toolCallId);
+            try {
+              // Eviction from the bounded receipt cache must not replay older bindings.
+              if (message !== latestContext) throw new Error("historical_context_receipt");
+              if (!packet || validIdentity(packet, ctx)) {
+                if (!valid) throw new Error("context_call_failed");
+                accept(packet!, ctx);
+              }
+            } catch {
+              valid = false;
+              if (message === latestContext) {
+                parts = []; revision = ""; failedCalls.add(message.toolCallId); diagnostic("context_call_failed");
+              }
             }
-            messages.push({ ...message, content: [{ type: "text" as const,
-              text: JSON.stringify({ shared_memory_receipt: packet.packet_revision, binding: packet.binding,
-                                     delivery: "current ephemeral packet; not another full copy" }) }], structuredContent: undefined });
-            continue;
           }
+          const continuation = packet && validIdentity(packet, ctx) && packet.status === "budget-limited"
+            && operationIdentity(message)?.valid && !failed(message)
+            && packet.continuation && typeof packet.continuation === "object"
+            && !Array.isArray(packet.continuation)
+            && Buffer.byteLength(JSON.stringify(packet), "utf8") <= byteLimit
+            && Buffer.byteLength(JSON.stringify(packet.continuation), "utf8") <= 1024
+            ? packet.continuation : undefined;
+          // Redact every recognized context result, including malformed/failed output.
+          // Native entries remain untouched; only this model-visible copy is replaced.
+          messages.push({ ...message, content: [{ type: "text" as const,
+            text: JSON.stringify(valid ? { shared_memory_receipt: packet!.packet_revision,
+              delivery: "current ephemeral packet; not another full copy" }
+              : { shared_memory_receipt: "unavailable", reason: continuation ? "context_budget" : "context_call_failed_or_scope_mismatch",
+                  ...(continuation ? { continuation } : {}) }) }],
+            structuredContent: undefined, details: undefined });
+          continue;
         }
         messages.push(message);
       }

@@ -7,4 +7,6 @@ build/
 dist/
 outputs/
 .shared-memory/
+# Private verification snapshots are evidence, not maintained source or index input.
+.local/
 .codegraph/

@@ -230,6 +230,16 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
               'Source-linked as-of understanding, not instructions or execution authority.\n'
               'caller_context: ' + _json(caller) + '\n')
     def build(chosen, omitted):
+        # Final delivery metadata belongs in every fit trial, not a late append.
+        # Rebuild from the read result so retries never accumulate duplicate gaps.
+        delivery = deepcopy(owner_status)
+        if delivery and delivery['items']:
+            presented_owners = {u['unit_id'] for u in chosen if u['id'].startswith('owner:')}
+            delivery['undelivered'] = [i['id'] for i in delivery['items'] if i['id'] not in presented_owners]
+            if delivery['undelivered']:
+                delivery['status'] = 'partial' if presented_owners else 'gap'
+                delivery['gaps'].append({'reason': 'owner_excerpt_budget_omitted',
+                                         'ids': delivery['undelivered']})
         boot = [u for u in chosen if is_background(u)]
         task = [u for u in chosen if not is_background(u)]
         for part in (boot, task):
@@ -239,26 +249,28 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
         deferred_text = '\nDeferred/read: ' + _json(deferred['read_hint']) if deferred else ''
         route_text = '\n'.join(f"Topic {r['id']}: {r['when']}" for r in routes)
         bootstrap = (prefix + '\n\n'.join(u['text'] for u in boot) + ('\n' + route_text if route_text else '') +
-                     (deferred_text if not task and not owner_status else '') + '\n</shared-memory-context>')
+                     (deferred_text if not task and not delivery else '') + '\n</shared-memory-context>')
         text = bootstrap
         parts = [{'kind': 'bootstrap', 'start': 0, 'end': len(bootstrap), 'revision': _digest(bootstrap)}]
         owner_notice = ''
-        if owner_status:
-            owner_notice = '\nCurrent owner coverage: ' + owner_status['status'] + '.'
-            if owner_status['gaps']:
+        if delivery:
+            owner_notice = '\nCurrent owner coverage: ' + delivery['status'] + '.'
+            if delivery['gaps']:
                 owner_notice += ' Unresolved: ' + '; '.join(
                     gap.get('id', ','.join(gap.get('ids', []))) + ' (' + gap['reason'] + ')'
-                    + (': ' + gap['read_hint']['path'] if gap.get('read_hint', {}).get('path') else '')
-                    for gap in owner_status['gaps']) + '. Read the relevant original owners before a current judgment.'
+                    for gap in delivery['gaps']) + '. Read the relevant original owners before a current judgment.'
         if task or owner_notice:
             task_text = ('<shared-memory-task-context>\ncaller_context: ' + _json(caller) + '\n' +
                          f'Packet: {source_revision}; task_mode: {task_mode or "unbound"}.\n' +
                          '\n\n'.join(u['text'] for u in task) + owner_notice + deferred_text + '\n</shared-memory-task-context>')
             text += '\n' + task_text
             parts.append({'kind': 'task', 'start': len(bootstrap) + 1, 'end': len(text), 'revision': _digest(task_text)})
-        return {'status': 'ok', 'packet_version': 1, 'packet_revision': source_revision,
+        limited = bool(units and not chosen)
+        return {'status': 'budget-limited' if limited else 'ok',
+                **({'diagnostic': {'code': 'context_budget'}} if limited else {}),
+                'packet_version': 1, 'packet_revision': source_revision,
                 'mode': 'task' if query.strip() else 'background', 'task_mode': task_mode,
-                **({'owner_checks': owner_status} if current_status else {}),
+                **({'owner_checks': delivery} if current_status else {}),
                 'scope': scope, 'caller_context': caller, 'text': text,
                 'parts': parts, 'part_offset_unit': 'unicode-codepoints',
                 'binding': {'task_mode': task_mode, 'query': query,
@@ -278,7 +290,7 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
             packet['budget']['serialized_bytes'] = exposure_size(packet)
         return (packet['budget']['serialized_bytes'] <= max_bytes and len(packet['text']) <= max_chars and
                 (token_counter is None or token_counter(serialized(packet)) <= TOKEN_TARGET))
-    chosen, seen = [], set()
+    chosen, seen, chosen_groups = [], set(), []
     total = sum(len(g) for g in units) + len(blocked) + max(0, len(groups) - limit)
     for group in units:
         fresh = [u for u in group if u['id'] not in seen]
@@ -288,33 +300,28 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
             routes.clear()
             candidate = build(chosen + fresh, max(0, total - len(chosen) - len(fresh)))
         if fits(candidate):
+            chosen_groups.append(group)
             chosen.extend(fresh); seen.update(u['id'] for u in fresh)
-    if current_status and owner_status and owner_status['items']:
-        presented = {u['unit_id'] for u in chosen if u['id'].startswith('owner:')}
-        owner_status['undelivered'] = [i['id'] for i in owner_status['items'] if i['id'] not in presented]
-        if owner_status['undelivered']:
-            owner_status['status'] = 'partial' if presented else 'gap'
-            owner_status['gaps'].append({'reason':'owner_excerpt_budget_omitted',
-                                         'ids':owner_status['undelivered']})
     result = build(chosen, max(0, total - len(chosen)))
     if not fits(result):
         routes.clear()
         result = build(chosen, max(0, total - len(chosen)))
+    # Final serializer/token checks may evict only whole accepted evidence groups.
+    while not fits(result) and chosen_groups:
+        chosen_groups.pop()
+        chosen = list({u['id']: u for group in chosen_groups for u in group}.values())
+        result = build(chosen, max(0, total - len(chosen)))
     if not fits(result):
-        diagnostic = {'status': 'budget-limited', 'text': '', 'diagnostic': {'code': 'context_budget'},
-                      'continuation': 'Use context with a larger explicit supported cap.'}
-        if len(serialized(diagnostic).encode()) > max_bytes:
+        diagnostic = {'status': 'budget-limited', 'text': '', 'diagnostic': {'code': 'context_budget'}}
+        pointer = next((u['read_hint'] for group in units for u in group), None)
+        if pointer:
+            diagnostic['continuation'] = deepcopy(pointer)
+        if exposure_size(diagnostic) > max_bytes:
+            diagnostic.pop('continuation', None)
+        if exposure_size(diagnostic) > max_bytes:
             diagnostic = {'status': 'budget-limited', 'diagnostic': {'code': 'context_budget'}}
         return diagnostic
-    if units and not chosen:
-        result['status'] = 'budget-limited'
-        result['diagnostic'] = {'code': 'context_budget'}
-        result['continuation'] = units[0][0]['read_hint']
-        # Reserve error metadata with the same serializer, without raising caller caps.
-        if not fits(result):
-            return {'status': 'budget-limited', 'text': '', 'diagnostic': {'code': 'context_budget'},
-                    'continuation': units[0][0]['read_hint']}
-    if previous_revision == source_revision:
+    if result['status'] == 'ok' and previous_revision == source_revision:
         return {'status': 'ok', 'packet_version': 1, 'packet_revision': source_revision,
                 'scope': scope, 'caller_context': caller, 'task_mode': task_mode,
                 'binding': {'task_mode': task_mode, 'query': query,
