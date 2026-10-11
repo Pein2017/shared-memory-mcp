@@ -10,7 +10,7 @@
 - [x] 2.3 Run focused existing regressions for nonempty recall, exact candidate approval, scoped successors, candidate/view isolation and qualified compact delivery using candidate imports and disposable stores; retain failures and actual exit status rather than treating publication counts as acceptance.
 - [x] 2.4 Validate this OpenSpec change with `openspec validate improve-capture-and-dreaming-closure --strict`, check owned diffs/skill reference links, and verify canonical HEAD/clean status and live bindings remain unchanged; record candidate validation and its limits in `design.md`.
 
-## 3. Later separately authorized adoption
+## 3. Adoption and remaining consumer assessment
 
-- [ ] 3.1 After explicit installation/adoption authorization, recheck canonical source and consumers, adopt the exact reviewed candidate, and qualify fresh real web-pi/Codex empty-mode search plus current skill discovery; source-only tests do not complete this task.
+- [ ] 3.1 Source adoption is complete at `eae7334e4c746499bc7471f2233511278b0faeac`, the temporary worktree/branch are removed, and all four fresh installed-CLI empty/whitespace mode checks pass. Finish qualification of fresh native web-pi/Codex empty-mode search plus current skill discovery; source tests and CLI consumption do not complete that consumer boundary.
 - [ ] 3.2 After the user's separate Dreaming request, review a bounded relevant source/backlog slice under current grants and report dispositions, omissions/conflicts, owner-verified issue closure and useful ordinary recall; record remaining coverage/behavior gaps without declaring whole-history success.

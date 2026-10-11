@@ -8,7 +8,7 @@ Recent bounded memory review found useful prompt capture alongside unreviewed ca
 - Make requested Dreaming review omissions, relevant candidates/issues, stale claims, duplicates and conflicts; distinguish unchanged approval, exact-scope supersession, withdrawal, conditional coexistence and deferred review.
 - Require compact, qualified navigation and a bounded ordinary-consumer readback before claiming recall usefulness. Record source coverage and unresolved work separately from technical publication.
 - Fix empty/whitespace search with `task_mode` as deterministic browsing without fabricated lexical matches, preserving eligibility and revision-fenced pagination.
-- Develop in an isolated checkout: current editable Python imports and linked skills/adapters mean editing the canonical checkout can activate changes without running an installer. Live adoption remains separately authorized.
+- Develop in an isolated checkout: current editable Python imports and linked skills/adapters mean editing the canonical checkout can activate changes without running an installer. The user subsequently authorized integration on 2026-10-11; the reviewed candidate is now adopted, while fresh native-consumer qualification remains pending.
 
 ## Capabilities
 
@@ -24,4 +24,4 @@ None; reuse existing lifecycle and tool surfaces.
 
 ## Impact
 
-Touches the bundled `skills/shared-memory/SKILL.md`, its existing `references/operations.md`, `src/shared_memory_mcp/recall.py`, focused regression tests and these OpenSpec artifacts. No new tools, schemas, dependencies, scheduler, transcript extraction, retirement action, permission expansion or history-parser change. This task does not install, change production policy/store contents, reload services or run Dreaming. Later adoption needs explicit authorization and fresh real-consumer qualification.
+Touches the bundled `skills/shared-memory/SKILL.md`, its existing `references/operations.md`, `src/shared_memory_mcp/recall.py`, focused regression tests and these OpenSpec artifacts. No new tools, schemas, dependencies, scheduler, transcript extraction, retirement action, permission expansion or history-parser change. Authorized integration adopted the existing linked source without reinstalling packages, changing production policy, reloading services or running Dreaming. Fresh native-consumer qualification and the separately requested Dreaming assessment remain pending. The user's separately requested cleanup preference capture is independent of this implementation change.
