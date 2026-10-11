@@ -11,7 +11,7 @@ import sqlite3
 
 from .core import MemoryError, _digest, _fail, _keys
 from .dream_sources import (MAX_BYTES, MAX_EVENTS, MAX_LINE, MAX_NATIVE_EVENT, PI_STRUCTURE_REVISION, SECRET, _open, _open_source, _native_line, _native_public,
-                            _branches, validate_source)
+                            _branches, validate_source, _range_digest, _same_file_range)
 
 MAX_HANDLES = 512
 
@@ -74,35 +74,44 @@ def _directory_identity(path):
         os.close(fd)
 
 
-def _verify(spec, version):
+def _verify(spec, version, *, verification=None):
+    stream = None
     try:
         if spec.get('_grant_root') and _directory_identity(spec['_grant_root']) != spec['_grant_identity']:
             return 'unverifiable'
         with _open_source(spec) as stream:
-            if _epoch(os.fstat(stream.fileno())) != version['epoch']:
+            current = _epoch(os.fstat(stream.fileno()))
+            ranged = 'prefix_sha256' in version
+            if (not _same_file_range(current, version['epoch'], version['cutoff']) if ranged
+                    else current != version['epoch']):
+                return 'stale'
+            if ranged and _range_digest(stream, version['consumed']) != version['prefix_sha256']:
+                return 'stale'
+            if version.get('structure_sha256') and _range_digest(stream, version['cutoff']) != version['structure_sha256']:
                 return 'stale'
             stream.seek(version['start'])
             remaining = version['consumed'] - version['start']
             if not 0 <= remaining <= MAX_BYTES:
                 return 'unverifiable'
-            digest = hashlib.sha256()
-            while remaining:
-                chunk = stream.read(min(65536, remaining))
-                if not chunk:
-                    return 'unverifiable'
-                digest.update(chunk)
-                remaining -= len(chunk)
-            if _epoch(os.fstat(stream.fileno())) != version['epoch']:
-                return 'stale'
+            page_digest = _range_digest(stream, version['consumed'], version['start'])
+            final = _epoch(os.fstat(stream.fileno()))
+            if final != current:
+                if (not ranged or not _same_file_range(final, version['epoch'], version['cutoff']) or
+                        _range_digest(stream, version['consumed']) != version['prefix_sha256'] or
+                        version.get('structure_sha256') and _range_digest(stream, version['cutoff']) != version['structure_sha256']):
+                    return 'stale'
             if spec.get('_grant_root') and _directory_identity(spec['_grant_root']) != spec['_grant_identity']:
                 return 'unverifiable'
-            return 'valid' if digest.hexdigest() == version['page_sha256'] else 'stale'
+            return 'valid' if page_digest == version['page_sha256'] else 'stale'
     except (OSError, MemoryError, KeyError, TypeError, ValueError):
         return 'unverifiable'
+    finally:
+        if verification is not None and stream is not None:
+            verification[0] += getattr(stream, '_dream_verification_bytes', 0)
 
 
-def check_page_snapshot(source, version):
-    return _verify(source, version)
+def check_page_snapshot(source, version, *, verification=None):
+    return _verify(source, version, verification=verification)
 
 
 def _decorate(source, events, version):
@@ -121,9 +130,15 @@ def _decorate(source, events, version):
 def _resolve_pi_structure(source, stream, cutoff, *, reference=None, db=None):
     """Resolve an exact epoch/grant-bound graph in the existing rebuildable cache."""
     cache = source['_structure_cache']
-    epoch = _epoch(os.fstat(stream.fileno()))
+    current_epoch = _epoch(os.fstat(stream.fileno()))
+    epoch = current_epoch
     if reference is not None and reference.get('projection_revision') != PI_STRUCTURE_REVISION:
         _fail('unsupported_structure_revision', 'Frozen Pi structural projection revision is unsupported; select a fresh source page')
+    if reference is not None and reference.get('raw_sha256'):
+        if (not _same_file_range(current_epoch, reference['epoch'], cutoff) or
+                _range_digest(stream, cutoff) != reference['raw_sha256']):
+            _fail('source_changed', 'Pi structural bytes changed within the frozen cutoff')
+        epoch = reference['epoch']
     binding = _digest([cache['owner'], epoch, cutoff, PI_STRUCTURE_REVISION])
     if reference is not None and (reference.get('cache_key') != binding or
                                   reference.get('epoch') != epoch or reference.get('cutoff') != cutoff):
@@ -143,6 +158,13 @@ def _resolve_pi_structure(source, stream, cutoff, *, reference=None, db=None):
         else:
             from .dream_sources import _scan_pi_structure
             metadata = _scan_pi_structure(source, stream, cutoff)
+            if reference is not None and not reference.get('raw_sha256'):
+                # Sealed older references keep their original structural digest.
+                metadata.pop('raw_sha256', None)
+                metadata['sha256'] = _digest({k: v for k, v in metadata.items() if k != 'sha256'})
+            if reference is not None and reference.get('raw_sha256'):
+                metadata['epoch'] = epoch
+                metadata['sha256'] = _digest({k: v for k, v in metadata.items() if k != 'sha256'})
             structure_bytes = cutoff
         digest = _digest({k: v for k, v in metadata.items() if k != 'sha256'})
         if (metadata.get('sha256') != digest or metadata.get('projection_revision') != PI_STRUCTURE_REVISION or metadata.get('epoch') != epoch or
@@ -152,12 +174,13 @@ def _resolve_pi_structure(source, stream, cutoff, *, reference=None, db=None):
             if db.execute('SELECT count(*) FROM structures').fetchone()[0] >= MAX_HANDLES:
                 db.execute('DELETE FROM structures WHERE rowid=(SELECT min(rowid) FROM structures)')
             db.execute('INSERT INTO structures VALUES (?,?)', (binding, json.dumps(metadata)))
-        if _epoch(os.fstat(stream.fileno())) != epoch:
+        if _epoch(os.fstat(stream.fileno())) != current_epoch:
             _fail('source_changed', 'Pi source changed during graph resolution')
         if owned:
             db.commit()
         return metadata, {'cache_key': binding, 'sha256': digest, 'epoch': epoch, 'cutoff': cutoff,
-                          'projection_revision': PI_STRUCTURE_REVISION}, structure_bytes
+                          'projection_revision': PI_STRUCTURE_REVISION,
+                          **({'raw_sha256': metadata['raw_sha256']} if 'raw_sha256' in metadata else {})}, structure_bytes
     finally:
         if owned:
             db.close()
@@ -167,14 +190,17 @@ def materialized_page(source, *, db=None):
     """Reconstruct one selected page from original bytes; never persist its text."""
     descriptor = source['_catalog_page']
     version = descriptor['version']
-    if _verify(source, version) != 'valid':
+    verification = [0]
+    if _verify(source, version, verification=verification) != 'valid':
         _fail('source_changed', 'Selected public page is stale')
     state = deepcopy(descriptor['state_before'])
     admitted = set(descriptor['admitted'])
     line = descriptor['line_before']
     events, gaps = [], []
     with _open_source(source) as stream:
-        if _epoch(os.fstat(stream.fileno())) != version['epoch']:
+        current = _epoch(os.fstat(stream.fileno()))
+        if (not _same_file_range(current, version['epoch'], version['cutoff']) if 'prefix_sha256' in version
+                else current != version['epoch']):
             _fail('source_changed', 'Selected public page changed during reconstruction')
         structure_bytes = 0
         if source['format'] == 'pi' and state.get('pi_metadata') and state['pi_metadata'].get('projection_revision') != PI_STRUCTURE_REVISION:
@@ -212,12 +238,14 @@ def materialized_page(source, *, db=None):
             if source['format'] == 'pi':
                 events, _ = _branches(source, events, gaps, state, 0)
             events = [e for e in events if e['byte_start'] in admitted]
+        range_verification_bytes = getattr(stream, '_dream_verification_bytes', 0)
     # Fence source mutation around the reconstruction, including replacement.
-    if _verify(source, version) != 'valid':
+    if _verify(source, version, verification=verification) != 'valid':
         _fail('source_changed', 'Selected public page changed during reconstruction')
     coverage = deepcopy(descriptor['coverage'])
+    coverage['read_bytes'] = version['consumed'] - version['start']
     coverage['structure_bytes'] = structure_bytes
-    coverage['verification_bytes'] += structure_bytes
+    coverage['verification_bytes'] += verification[0] + structure_bytes + range_verification_bytes
     if source['format'] == 'pi' and gaps:
         coverage['complete'] = False
         coverage['gaps'] = list({json.dumps(g, sort_keys=True): g for g in [*coverage['gaps'], *gaps]}.values())
@@ -229,7 +257,9 @@ def materialized_page(source, *, db=None):
 class SourceCatalog:
     def __init__(self, store, profile_id, profile):
         self.store, self.profile_id, self.profile = store, profile_id, deepcopy(profile)
-        self.grants = validate_source_grants(store, self.profile['source_grants'])
+        self.inherited = self.profile.get('read_access', 'restricted') == 'inherited'
+        grants = self.profile['source_grants']
+        self.grants = [] if self.inherited and grants == [] else validate_source_grants(store, grants)
         # Persist locators, parser state and metadata; public text stays in its source.
         self.dbpath = store.root / 'dream' / 'catalog.sqlite3'
 
@@ -278,13 +308,41 @@ class SourceCatalog:
                 return grant
         _fail('dream_access_denied', 'Source grant is not authorized')
 
+    def _inherited_path(self, value):
+        if not self.inherited:
+            _fail('dream_access_denied', 'Inherited reading is not enabled by the trusted profile')
+        if not isinstance(value, str) or len(value) > 4096 or '\x00' in value:
+            _fail('unsafe_source', 'Source path must be a bounded absolute path')
+        path = Path(value)
+        if not path.is_absolute() or '..' in path.parts:
+            _fail('unsafe_source', 'Source path must be absolute without traversal')
+        if (path.resolve().is_relative_to(self.store.root.resolve()) or
+                any(p == '.env' or p.startswith('.env.') or p in {'auth.json', 'credentials.json'} for p in path.parts)):
+            _fail('unsafe_source', 'Credential files and raw memory store are not sources')
+        return str(path)
+
     def _structure_owner(self, spec, grant, relative, grant_identity):
         if spec['format'] == 'pi':
             spec['_structure_cache'] = {'path': str(self.dbpath),
                 'owner': _digest([self.profile_id, _digest(grant), relative, grant_identity])}
 
     def _spec(self, selection):
-        _keys(selection, {'grant_id'}, {'grant_id', 'path', 'relative_path', 'leaf_id', 'page'}, 'source selection')
+        if 'cutoff' in selection and (type(selection['cutoff']) is not int or selection['cutoff'] < 0):
+            _fail('invalid_input', 'Frozen source cutoff must be a nonnegative byte position')
+        if 'absolute_path' in selection:
+            _keys(selection, {'absolute_path', 'format', 'schema'},
+                  {'absolute_path', 'format', 'schema', 'native_version', 'leaf_id', 'page', 'cutoff'}, 'inherited source selection')
+            path = self._inherited_path(selection['absolute_path'])
+            spec = {'id': 'inherited-' + _digest(path)[:32], 'path': path,
+                    **{k: selection[k] for k in ['format', 'schema', 'native_version', 'leaf_id'] if k in selection}}
+            validate_source(spec, allow_instructions=True)
+            grant = {k: v for k, v in spec.items() if k != 'leaf_id'}
+            grant.update(kind='file', read_access='inherited')
+            spec['_inherited_selection'] = {k: v for k, v in selection.items() if k != 'page'}
+            if 'cutoff' in selection:
+                spec['_source_cutoff'] = selection['cutoff']
+            return grant, '', spec
+        _keys(selection, {'grant_id'}, {'grant_id', 'path', 'relative_path', 'leaf_id', 'page', 'cutoff'}, 'source selection')
         grant = self._grant(selection['grant_id'])
         if 'path' in selection and 'relative_path' in selection:
             _fail('invalid_input', 'Choose one relative path field')
@@ -300,13 +358,23 @@ class SourceCatalog:
         if 'leaf_id' in selection:
             spec['leaf_id'] = selection['leaf_id']
         validate_source(spec)
+        if 'cutoff' in selection:
+            spec['_source_cutoff'] = selection['cutoff']
         return grant, relative, spec
 
     def list(self, grant_id, relative_dir='', cursor=None, limit=50):
         if type(limit) is not int or not 1 <= limit <= 100:
             _fail('source_limit', 'Listing limit must be between one and one hundred')
-        grant = self._grant(grant_id)
-        relative_dir = _relative(relative_dir)
+        absolute_directory = isinstance(grant_id, str) and Path(grant_id).is_absolute()
+        if absolute_directory:
+            path = self._inherited_path(grant_id)
+            grant = {'id': 'inherited-' + _digest(path)[:32], 'path': path, 'kind': 'directory',
+                     'read_access': 'inherited'}
+            if not isinstance(relative_dir, str) or Path(relative_dir).is_absolute() or '..' in Path(relative_dir).parts:
+                _fail('unsafe_source', 'Directory selection must stay within its root')
+        else:
+            grant = self._grant(grant_id)
+            relative_dir = _relative(relative_dir)
         if grant['kind'] == 'file':
             if relative_dir or cursor:
                 _fail('invalid_cursor', 'Exact-file listing has no continuation')
@@ -314,6 +382,8 @@ class SourceCatalog:
                 st = os.fstat(stream.fileno())
             return {'items': [{'grant_id': grant_id, 'path': '', 'kind': 'file', 'size': st.st_size}], 'next_cursor': None}
         path = Path(grant['path']) / relative_dir
+        if absolute_directory:
+            path = Path(self._inherited_path(str(path)))
         grant_identity = _directory_identity(grant['path'])
         fd = _open(path, directory=True, identities={grant['path']: grant_identity})
         try:
@@ -329,12 +399,22 @@ class SourceCatalog:
                     after = prior['after']
                 items = []
                 import heapq
-                entries = heapq.nsmallest(limit + 1, (e for e in os.scandir(fd) if e.name > after and not e.is_symlink()
-                        and e.name not in {'AGENTS.md', 'SKILL.md', '.env'}), key=lambda e: e.name)
+                def eligible(entry):
+                    if entry.name <= after or entry.is_symlink():
+                        return False
+                    if absolute_directory:
+                        try:
+                            self._inherited_path(str(path / entry.name))
+                        except MemoryError:
+                            return False
+                        return True
+                    return entry.name not in {'AGENTS.md', 'SKILL.md', '.env'}
+                entries = heapq.nsmallest(limit + 1, (e for e in os.scandir(fd) if eligible(e)), key=lambda e: e.name)
                 for entry in entries[:limit]:
                     if entry.is_file(follow_symlinks=False) or entry.is_dir(follow_symlinks=False):
                         items.append({'grant_id': grant_id, 'path': str(Path(relative_dir) / entry.name),
-                                      'kind': 'directory' if entry.is_dir(follow_symlinks=False) else 'file'})
+                                      'kind': 'directory' if entry.is_dir(follow_symlinks=False) else 'file',
+                                      **({'absolute_path': str(path / entry.name)} if absolute_directory else {})})
                 if (_listing_stamp(fd) != initial or _directory_identity(path) != initial[0][:2]
                         or _directory_identity(grant['path']) != grant_identity):
                     _fail('source_changed', 'Directory changed during listing')
@@ -366,6 +446,8 @@ class SourceCatalog:
                     saved = self._get(db, grant, 'page', selection['page'])
                 if saved['relative'] != relative or saved.get('leaf_id') != spec.get('leaf_id'):
                     _fail('invalid_cursor', 'Page selector does not match this source')
+                if 'cutoff' in selection and selection['cutoff'] != saved['descriptor']['version']['cutoff']:
+                    _fail('invalid_cursor', 'Page selector does not match the frozen cutoff')
                 spec['_catalog_page'] = saved['descriptor']
                 spec['_grant_identity'] = saved.get('grant_identity')
                 if _verify(spec, saved['descriptor']['version']) != 'valid':
@@ -373,11 +455,41 @@ class SourceCatalog:
             specs.append(spec)
         return specs
 
-    def authorized(self, spec):
+    def freeze(self, selection):
+        """Capture complete persisted events; an active unfinished tail is deferred."""
+        if selection.get('page'):
+            _fail('invalid_input', 'Freeze a source selection before reading pages')
+        spec = self.resolve([selection])[0]
         try:
-            selection = {'grant_id': spec['_grant_id'], 'path': spec['_relative_path']}
+            with _open_source(spec) as stream:
+                epoch = _epoch(os.fstat(stream.fileno()))
+                cutoff = selection.get('cutoff', epoch[2])
+                if cutoff > epoch[2]:
+                    _fail('source_changed', 'Selected cutoff exceeds the available source')
+                if spec['format'] != 'document' and cutoff:
+                    stream.seek(cutoff - 1)
+                    if stream.read(1) != b'\n':
+                        start = max(0, cutoff - MAX_NATIVE_EVENT)
+                        stream.seek(start)
+                        tail = stream.read(cutoff - start)
+                        complete = tail.rfind(b'\n')
+                        if complete < 0 and start:
+                            _fail('source_limit', 'Unfinished native tail exceeds the supported event byte limit')
+                        cutoff = start + complete + 1
+                if _epoch(os.fstat(stream.fileno())) != epoch:
+                    _fail('source_changed', 'Source changed while capturing its complete-event cutoff')
+                return {'selection': {**selection, 'cutoff': cutoff}, 'identity': epoch[:2], 'epoch': epoch,
+                        'deferred_bytes': epoch[2] - cutoff}
+        except OSError:
+            _fail('source_unavailable', 'Authorized source is unavailable')
+
+    def authorized(self, spec, *, require_available=True):
+        try:
+            selection = deepcopy(spec.get('_inherited_selection', {'grant_id': spec['_grant_id'], 'path': spec['_relative_path']}))
             if 'leaf_id' in spec:
                 selection['leaf_id'] = spec['leaf_id']
+            if '_source_cutoff' in spec:
+                selection['cutoff'] = spec['_source_cutoff']
             grant, _, expected = self._spec(selection)
             if spec['_grant_digest'] != _digest(grant):
                 return False
@@ -385,6 +497,10 @@ class SourceCatalog:
                 return False
             if grant['kind'] == 'directory':
                 return _directory_identity(grant['path']) == spec['_grant_identity']
+            # Actual process access remains authoritative for inherited reads.
+            if require_available and spec.get('_inherited_selection'):
+                with _open_source(spec):
+                    pass
             return True
         except (MemoryError, OSError, KeyError):
             return False
@@ -404,16 +520,30 @@ class SourceCatalog:
                 # Complete continuation atomically: retries reuse the same page
                 # rather than advancing the identity index twice.
                 db.execute('BEGIN IMMEDIATE')
-                epoch = _epoch(os.fstat(stream.fileno()))
+                current_epoch = _epoch(os.fstat(stream.fileno()))
                 prior = self._get(db, grant, 'read', cursor) if cursor else None
-                if prior and (prior['relative'] != relative or prior.get('leaf_id') != spec.get('leaf_id') or prior['epoch'] != epoch or prior['grant_identity'] != grant_identity):
-                    _fail('source_changed', 'Source epoch changed; append continuity is not supported')
+                epoch = prior['epoch'] if prior else current_epoch
+                cutoff = prior.get('cutoff', epoch[2]) if prior else spec.get('_source_cutoff', epoch[2])
+                if cutoff > current_epoch[2] or ('_source_cutoff' in spec and spec['_source_cutoff'] != cutoff):
+                    _fail('source_changed', 'Source is smaller than the selected cutoff or the cutoff changed')
+                if prior and (prior['relative'] != relative or prior.get('leaf_id') != spec.get('leaf_id') or
+                              prior['grant_identity'] != grant_identity or
+                              (not _same_file_range(current_epoch, epoch, cutoff) if 'prefix_sha256' in prior else current_epoch != epoch)):
+                    _fail('source_changed', 'Source identity or frozen range changed')
+                if prior and 'prefix_sha256' in prior and _range_digest(stream, prior['offset']) != prior['prefix_sha256']:
+                    _fail('source_changed', 'Consumed source prefix changed')
                 if prior and prior.get('completed'):
                     completed = prior['completed']
                     spec['_catalog_page'] = completed['descriptor']
                     if grant_identity is not None:
                         spec['_grant_root'], spec['_grant_identity'] = grant['path'], grant_identity
                     material = materialized_page(spec, db=db)
+                    if 'coverage' in completed:
+                        structure_bytes = material['coverage']['structure_bytes']
+                        saved_coverage = deepcopy(completed['coverage'])
+                        saved_coverage['verification_bytes'] += structure_bytes - saved_coverage['structure_bytes']
+                        saved_coverage['structure_bytes'] = structure_bytes
+                        material['coverage'] = saved_coverage
                     self._put(db, grant, 'page', completed['page_body'])
                     return {**material, 'selection': completed['selection'], 'next_cursor': completed['next_cursor']}
                 offset = prior['offset'] if prior else 0
@@ -425,14 +555,14 @@ class SourceCatalog:
                 pi_reference = None
                 if spec['format'] == 'pi':
                     metadata, pi_reference, structure_bytes = _resolve_pi_structure(
-                        spec, stream, epoch[2], reference=state.get('pi_metadata') if 'cache_key' in state.get('pi_metadata', {}) else None, db=db)
+                        spec, stream, cutoff, reference=state.get('pi_metadata') if 'cache_key' in state.get('pi_metadata', {}) else None, db=db)
                     state['pi_metadata'] = metadata
                 state_before = deepcopy(state)
                 if pi_reference is not None:
                     state_before['pi_metadata'] = pi_reference
                 line_before = line_number
                 stream.seek(offset)
-                end = min(epoch[2], offset + max_bytes)
+                end = min(cutoff, offset + max_bytes)
                 events, gaps, excluded = [], deepcopy(state.get('pi_metadata', {}).get('gaps', [])), 0
                 digest = hashlib.sha256()
                 scanned = offset
@@ -487,21 +617,30 @@ class SourceCatalog:
                         event.update(raw_digest=raw_digest, locator=f'line:{line_number}', byte_start=start)
                         events.append(event)
                 position = stream.tell()
-                if _epoch(os.fstat(stream.fileno())) != epoch or (grant_identity is not None and _directory_identity(grant['path']) != grant_identity):
+                prefix_sha256 = _range_digest(stream, position)
+                if (not _same_file_range(_epoch(os.fstat(stream.fileno())), epoch, cutoff) or
+                        _range_digest(stream, position, offset) != digest.hexdigest() or
+                        prior and 'prefix_sha256' in prior and _range_digest(stream, offset) != prior['prefix_sha256'] or
+                        pi_reference and _range_digest(stream, cutoff) != pi_reference.get('raw_sha256') or
+                        grant_identity is not None and _directory_identity(grant['path']) != grant_identity):
                     _fail('source_changed', 'Source changed during public page read')
                 events, excluded = _branches(spec, events, gaps, state, excluded)
                 if pi_reference is not None:
                     state['pi_metadata'] = pi_reference
                 # Conflicts remain a page-local rejection; never trust cross-page branch ancestry.
                 state.pop('conflicting_ids', None)
-                version = {'epoch': epoch, 'identity': epoch[:2], 'cutoff': epoch[2], 'start': offset,
-                           'consumed': position, 'page_sha256': digest.hexdigest(), 'schema': spec['schema']}
+                version = {'epoch': epoch, 'identity': epoch[:2], 'cutoff': cutoff, 'start': offset,
+                           'consumed': position, 'page_sha256': digest.hexdigest(), 'prefix_sha256': prefix_sha256,
+                           'schema': spec['schema']}
+                if pi_reference:
+                    version['structure_sha256'] = pi_reference['raw_sha256']
                 if spec['format'] == 'codex':
                     version['native_version'] = state.get('native_version')
-                if position < epoch[2]:
+                if position < cutoff:
                     gaps.append({'reason': 'bounded_partial', 'next_offset': position})
-                coverage = {'discovered_bytes': epoch[2], 'read_bytes': max(scanned, position)-offset, 'verification_bytes': structure_bytes + framing_verification_bytes, 'structure_bytes': structure_bytes,
-                    'events': len(events), 'excluded': excluded, 'complete': position==epoch[2] and not gaps, 'gaps': gaps}
+                coverage = {'discovered_bytes': cutoff, 'read_bytes': max(scanned, position)-offset,
+                    'verification_bytes': getattr(stream, '_dream_verification_bytes', 0) + structure_bytes + framing_verification_bytes, 'structure_bytes': structure_bytes,
+                    'events': len(events), 'excluded': excluded, 'complete': position==cutoff and not gaps, 'gaps': gaps}
                 descriptor = {'version': version, 'state_before': state_before, 'line_before': line_before,
                     'admitted': [e.get('byte_start', offset) for e in events],
                     # Reconstruction reuses metadata; its page identity must not depend on cache I/O.
@@ -514,12 +653,16 @@ class SourceCatalog:
                 page = self._put(db, grant, 'page', body)
                 next_cursor = self._put(db, grant, 'read', {'relative': relative, 'leaf_id': spec.get('leaf_id'),
                     'grant_identity': grant_identity, 'epoch': epoch, 'offset': position, 'line': line_number,
-                    'state': state, 'pass_id': pass_id}) if position < epoch[2] else None
-                selected = {'grant_id': grant['id'], 'path': relative, 'page': page}
+                    'cutoff': cutoff, 'prefix_sha256': prefix_sha256,
+                    'state': state, 'pass_id': pass_id}) if position < cutoff else None
+                selected = ({**spec['_inherited_selection'], 'page': page} if '_inherited_selection' in spec
+                            else {'grant_id': grant['id'], 'path': relative, 'page': page})
+                if '_source_cutoff' in spec:
+                    selected['cutoff'] = cutoff
                 if 'leaf_id' in spec:
                     selected['leaf_id'] = spec['leaf_id']
                 if cursor:
-                    prior['completed'] = {'descriptor': descriptor, 'page_body': body,
+                    prior['completed'] = {'descriptor': descriptor, 'page_body': body, 'coverage': coverage,
                         'selection': selected, 'next_cursor': next_cursor}
                     # If capacity eviction removed this cursor, restore the
                     # completed response binding for immediate retry recovery.

@@ -44,7 +44,9 @@ def test_pending_review_over_unchanged_sources_is_actionable(tmp_path):
 def test_source_drift_retains_dated_account(tmp_path):
     engine, _, _, _, _, owner, _ = environment(tmp_path)
     _, _, previous = publish_account(engine)
-    owner.write_text(owner.read_text() + '\nUnrelated execution-preparation note.\n')
+    original = owner.read_text()
+    assert 'coverage 7' in original
+    owner.write_text(original.replace('coverage 7', 'coverage 8', 1))
     current = engine.overview('research', scenario='research')
     assert 'no transfer is established' in current['text'], current
     assert current['status'] == 'stale'

@@ -52,6 +52,7 @@ def test_one_real_stdio_connection_recalls_corrects_and_starts_bounded_review(tm
                 assert started['status'] == 'created'
                 material = unpack(await client.call_tool('run_materials', {'context': caller, 'run_id': started['run_id']}))
                 statuses = {e['key']: 'no-signal' for source in material['sources'].values() for e in source['events']}
+                statuses.update({item['ref']: 'no-signal' for item in started['objective_progress']['ready_memory']})
                 unpack(await client.call_tool('coverage_mark', {'context': caller, 'run_id': started['run_id'], 'generation': started['generation'], 'statuses': statuses}))
                 closed = unpack(await client.call_tool('run_close', {'context': caller, 'run_id': started['run_id'],
                     'generation': started['generation'], 'objective_outcome': 'disposed'}))

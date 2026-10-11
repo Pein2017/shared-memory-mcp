@@ -149,7 +149,13 @@ def test_selected_page_does_not_copy_unrelated_text_and_append_keeps_memory(tmp_
             'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Later unrelated append.'}]}}) + '\n')
     assert store.read(owner_caller, [identifier])['items'][0]['id'] == identifier
     frozen = engine.freeze(run['run_id'], 1, [record_op('new', claim(key, level='report'))])
-    assert engine.publish(run['run_id'], 1, frozen['draft_revision'])['status'] == 'blocked'
+    assert engine.publish(run['run_id'], 1, frozen['draft_revision'])['status'] == 'applied'
+    with human.open('r+b') as stream:
+        data = stream.read().replace(b'research detail', b'research detoil')
+        stream.seek(0)
+        stream.write(data)
+    rejected = engine.freeze(run['run_id'], 1, [record_op('changed-consumed', claim(key, level='report'))])
+    assert engine.publish(run['run_id'], 1, rejected['draft_revision'])['status'] == 'blocked'
 
 
 def test_materialized_page_obeys_run_event_budget(tmp_path):

@@ -345,8 +345,16 @@ def test_uri_no_use_matches_local_file_identity_on_both_sides(tmp_path, disposit
 @pytest.mark.parametrize('settlement', ['partial-close', 'reviewed-replacement'])
 def test_receipt_recovery_preserves_external_promotion_and_review_fence(tmp_path, monkeypatch, settlement):
     engine, store, caller, owner_caller, _, owner, _ = environment(tmp_path)
+    input_source = {'uri': 'https://example.invalid/independent-input'}
+    input_record = {'scope': 'project', 'kind': 'observation', 'title': 'independent-input',
+                    'body': 'An independently reviewed fixture input.', 'sources': [input_source]}
+    input_id = store.propose(owner_caller, input_record, 'canonical-input')['record']['id']
+    store.promote(owner_caller, input_id, {'reason': 'Fixture input review', 'evidence': [input_source]},
+                  'canonical-input-review')
+    input_path = store.root / 'records/demo' / (input_id + '.md')
     rid, gen, key, _ = begin(engine)
-    frozen = engine.freeze(rid, gen, [record_op('A', claim(key), visibility='candidate'), record_op('B', claim(key))])
+    dependent_claim = {**claim('record:' + input_id), 'topic': 'independent-input'}
+    frozen = engine.freeze(rid, gen, [record_op('A', claim(key), visibility='candidate'), record_op('B', dependent_claim)])
     def crash(point, operation):
         if point == 'effect-0-written':
             raise RuntimeError('receipt interruption')
@@ -357,6 +365,9 @@ def test_receipt_recovery_preserves_external_promotion_and_review_fence(tmp_path
     store.promote(owner_caller, identifier, {'reason': 'Independent review', 'evidence': [{'uri': owner.as_uri()}]}, 'external-promotion')
     path = store.root / 'records/demo' / (identifier + '.md')
     promoted_bytes = path.read_bytes()
+    store.curate(owner_caller, input_id, {'reason': 'Independent input correction', 'evidence': [input_source]},
+                 'external-input-curation', details={'conditions': 'Changed fixture applicability'})
+    curated_input_bytes = input_path.read_bytes()
     resumed = Dreaming(store, 'fixture', {**caller, 'harness': 'pi', 'session_id': 'fixture-executor-B'}, publisher=True)
     resumed.takeover(rid, gen)
     result = resumed.publish(rid, 2, frozen['draft_revision'])
@@ -365,14 +376,15 @@ def test_receipt_recovery_preserves_external_promotion_and_review_fence(tmp_path
     receipt = result['applied'][0]
     assert receipt['executor'] == engine.caller and receipt['acknowledged_by'] == resumed.caller
     assert [(e['operation_id'], e['code']) for e in result['unresolved']] == [('B', 'stale_basis')]
-    assert path.read_bytes() == promoted_bytes and len(store._load('demo')) == 1
+    assert path.read_bytes() == promoted_bytes and input_path.read_bytes() == curated_input_bytes
+    assert len(store._load('demo')) == 2
     if settlement == 'partial-close':
         closed = resumed.close(rid, 2, abandon_reason='Reviewed external promotion; preserve it and abandon B')
         assert closed['partial'] and resumed.start()['status'] != 'resume-required'
     else:
         _, result = freeze_publish(resumed, rid, 2, [record_op('C', claim(key))], reconsider_reason='Reviewed external promotion and revised remaining work')
-        assert result['status'] == 'applied' and len(store._load('demo')) == 2
-    assert path.read_bytes() == promoted_bytes
+        assert result['status'] == 'applied' and len(store._load('demo')) == 3
+    assert path.read_bytes() == promoted_bytes and input_path.read_bytes() == curated_input_bytes
 
 
 @pytest.mark.parametrize('changed_binding', ['proposal-key', 'proposal-digest', 'provenance'])

@@ -55,7 +55,17 @@ def validate_policy(store, policy):
     for name, profile in policy['profiles'].items():
         if not isinstance(name, str) or not SAFE_ID.fullmatch(name):
             _fail('invalid_policy', 'Invalid profile name')
-        _keys(profile, fields, fields | {'reader_projects'}, 'dream profile')
+        _keys(profile, fields, fields | {'reader_projects', 'read_access', 'history_roots'}, 'dream profile')
+        if profile.get('read_access', 'granted') not in {'granted', 'inherited'}:
+            _fail('invalid_policy', 'Unsupported trusted source read boundary')
+        roots = profile.get('history_roots', [])
+        if not isinstance(roots, list) or len(roots) > 16:
+            _fail('invalid_policy', 'History discovery roots must be a bounded list')
+        for root in roots:
+            _keys(root, {'path', 'format', 'schema'}, {'path', 'format', 'schema', 'native_version'}, 'history root')
+            if profile.get('read_access') != 'inherited' or root['format'] not in {'codex', 'pi'}:
+                _fail('invalid_policy', 'Native history discovery requires trusted inherited reads')
+            validate_source({'id': 'history-discovery', **root})
         if 'reader_projects' in profile:
             bounded_strings(profile['reader_projects'], 'reader_projects')
             if not set(profile['reader_projects']) <= projects:
@@ -204,7 +214,7 @@ def record_use_filter(store, *, scope='research'):
                     spec = next(s for s in SourceCatalog(store, binding['profile'], profile).resolve() if s['id'] == binding['source_id'])
                 if record['project_id'] not in profile['target_projects'] or Path(spec['path']).as_uri() != source['uri']:
                     return False
-                if not SourceCatalog(store, binding['profile'], profile).authorized(spec) or binding.get('source_grant') != _digest(spec):
+                if not SourceCatalog(store, binding['profile'], profile).authorized(spec, require_available=False) or binding.get('source_grant') != _digest(spec):
                     return False
                 keys = _source_keys({binding['event_key'], 'source:' + binding['source_id'], 'source-uri:' + source['uri'], *binding['lineage']})
                 for item in ledger:
@@ -318,7 +328,9 @@ class Dreaming:
             return {'profile_id': self.profile_id, 'target_projects': profile['target_projects'],
                     'source_grants': [{k: deepcopy(v) for k, v in grant.items() if k in grant_fields} for grant in profile['source_grants']],
                     'actions': profile['actions'], 'publisher': self.publisher, 'active_runs': selected,
-                    'revision': revision, 'next_cursor': next_cursor}
+                    'revision': revision, 'next_cursor': next_cursor,
+                    'read_access': profile.get('read_access', 'granted'),
+                    'history_roots': deepcopy(profile.get('history_roots', []))}
 
     def source_list(self, grant_id, *, relative_dir='', cursor=None, limit=50):
         return self._catalog().list(grant_id, relative_dir=relative_dir, cursor=cursor, limit=limit)
@@ -345,6 +357,80 @@ class Dreaming:
         from .dream_incremental import collect
         return collect(profile, previous, reconsider=reconsider)
 
+    def _operation_basis(self, run, operation, created_refs=()):
+        """Fence the reviewed inputs and target, leaving unrelated writers independent."""
+        policy, profile = self._policy()
+        claims = operation.get('claims', []) if operation['action'] == 'view_publish' else [operation['claim']] if 'claim' in operation else []
+        refs = set(operation['review']['checked_refs']) | {r for c in claims for r in c['refs']}
+        prefix = 'collaboration:' if operation['action'].startswith('collaboration_') else 'record:'
+        refs.update(prefix + r for r in operation.get('predecessors', []))
+        if operation.get('record_id'):
+            refs.add(prefix + operation['record_id'])
+        records = {'record:' + r['id']: r for r in projected_records(self.store, run['target'])}
+        records.update({'collaboration:' + r['id']: r for r in collaboration(self.store)})
+        events = self._events(run)
+        selected = {events[r]['source_id'] for r in refs if r in events}
+        originals = {s['id']: s for s in run['profile_snapshot']['sources'] if s['id'] in selected}
+        current = {s['id']: s for s in self._effective(run)['sources'] if s['id'] in selected}
+        topics = {c['topic'] for c in claims} | {records[r]['title'] for r in refs if r in records and r.startswith('record:')}
+        scope = operation.get('view', 'collaboration' if prefix == 'collaboration:' else 'research')
+        registry = {p['id']: p for p in self.store._registry()['projects']}
+        executor = self.store._resolve(self.caller)['project_id']
+        source_uris = {Path(originals[s]['path']).as_uri() for s in originals}
+        source_uris.update(s['uri'] for r in refs if r in records for s in records[r]['sources'])
+        return {'records': {r: _digest(records.get(r)) for r in sorted(refs) if r.startswith(('record:', 'collaboration:')) and r not in created_refs},
+                'targets': {prefix + r: _digest(records.get(prefix + r)) for r in
+                            [*operation.get('predecessors', []), *([operation['record_id']] if operation.get('record_id') else [])]},
+                'related_records': {r: _digest(v) for r, v in records.items() if r not in created_refs and
+                                    (v.get('title') in topics or source_uris.intersection(s['uri'] for s in v['sources']))},
+                'sources': _digest(current) if current == originals else 'access-changed',
+                'policy': {'version': policy['version'], 'subject': policy['subject'],
+                           'target_allowed': run['target'] in profile['target_projects'],
+                           'executor_allowed': executor in profile['executor_projects'],
+                           'action_allowed': operation['action'] in profile['actions'],
+                           'scenarios': sorted({s for c in claims for s in c['scenarios']}.intersection(profile['scenarios'])),
+                           'collaboration': sorted({p for c in claims for p in c['projects']}.intersection(policy['collaboration_projects'])) if scope == 'collaboration' else None,
+                           'allow_inferred': profile['allow_inferred'] if any(c['level'] == 'inferred' for c in claims) else None},
+                'registry': {p: registry.get(p) for p in {run['target'], executor}},
+                'dispositions': _digest([d for d in dispositions(self.store)['items'] if d['target'] == run['target'] and d['scope'] == scope and d['topic'] in topics | {'*'}])}
+
+    def _progress(self, run):
+        from .dream_incremental import load_objective
+        value = run.get('objective_progress')
+        return load_objective(self.store, value) if value else None
+
+    def _memory_inputs(self, target, policy):
+        items = {'record:' + r['id']: r for r in projected_records(self.store, target)}
+        items.update({'collaboration:' + r['id']: r for r in collaboration(self.store)
+                      if target in set(policy['collaboration_projects']).intersection(r['claim']['projects'])})
+        return {ref: {'revision': _digest(record)} for ref, record in items.items()}
+
+    def _increment(self, catalog, progress, memory_inputs):
+        """A completed cutoff may start another increment; open cutoffs stay fixed."""
+        from .dream_incremental import objective_inventory
+        progress = deepcopy(progress)
+        progress['inventory_complete'] = False
+        progress = objective_inventory(catalog, progress['review_objective'], previous=progress,
+                                       binding=progress['binding'])
+        for entry in progress['sources'].values():
+            try:
+                stat = Path(entry['path']).stat()
+                epoch = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+                if entry.get('epoch') == epoch:
+                    continue
+                frozen = catalog.freeze({k: v for k, v in entry['selection'].items() if k not in {'cutoff', 'page'}})
+                entry.update(selection=frozen['selection'], cutoff=frozen['selection']['cutoff'],
+                             identity=frozen['identity'], epoch=frozen.get('epoch'),
+                             deferred_bytes=frozen['deferred_bytes'], reviewed_offset=0,
+                             cursor=None, pending_page=None, status='pending', gaps=[])
+            except (MemoryError, OSError) as exc:
+                entry.update(status='pending', gaps=[{'reason': getattr(exc, 'code', 'source_unavailable')}])
+        for ref, supplied in memory_inputs.items():
+            prior = progress['memory'].get(ref)
+            if not prior or prior['revision'] != supplied['revision']:
+                progress['memory'][ref] = {**supplied, 'status': 'pending'}
+        return progress
+
     def start(self, *, target_project=None, sources=None, reconsider=None, review_objective=None):
         if review_objective is not None:
             _keys(review_objective, {'id', 'question'}, {'id', 'question'}, 'review objective')
@@ -354,8 +440,10 @@ class Dreaming:
                 _fail('invalid_objective', 'A review objective needs a stable id and bounded question')
         policy, profile = self._policy()
         target = self._target(profile, target_project)
-        profile = {**profile, 'target_project': target, 'sources': self._catalog(profile).resolve(sources)}
-        lane = _digest({'profile': self.profile_id, 'target': target, 'sources': profile['sources']})
+        catalog = self._catalog(profile)
+        profile = {**profile, 'target_project': target}
+        lane = _digest({'profile': self.profile_id, 'target': target, 'objective_lane': True}) if review_objective else _digest(
+            {'profile': self.profile_id, 'target': target, 'sources': catalog.resolve(sources)})
         active_path = f'dreaming/active/{self.profile_id}-{lane}.json'
         checkpoint_path = f'dreaming/checkpoints/{self.profile_id}-{lane}.json'
         with self.store._gate():
@@ -371,6 +459,14 @@ class Dreaming:
             if active and existing.get('checkpoint'):
                 checkpoint = existing['checkpoint']
             previous = self._run(checkpoint['run_id'], check_caller=False) if checkpoint else None
+            objective_path = f'dreaming/checkpoints/{self.profile_id}-{_digest([target, review_objective["id"]])}-objective.json' if review_objective else None
+            if objective_path:
+                objective_index = read_json(self.store, objective_path)
+                if previous and previous.get('review_objective') == review_objective and previous.get('objective_progress'):
+                    pass  # Recover close-before-index using the durable Run.
+                elif objective_index:
+                    previous = self._run(objective_index['run_id'], check_caller=False)
+                    checkpoint = previous.get('checkpoint')
         old_objective = previous.get('review_objective') if previous else None
         if review_objective is None and old_objective is not None:
             review_objective = deepcopy(old_objective)
@@ -378,8 +474,30 @@ class Dreaming:
                 review_objective != old_objective):
             _fail('objective_conflict', 'Changed objective text needs a new objective identity')
         same_objective = review_objective == old_objective
-        materials, processed, read_bytes = self._collect(profile, previous if same_objective else None,
+        progress, memory_inputs, staging_bytes = None, {}, 0
+        if review_objective:
+            from .dream_incremental import objective_inventory, objective_batch, objective_observe
+            with self.store._gate():
+                memory_inputs = self._memory_inputs(target, policy)
+                progress = self._progress(previous) if previous and same_objective else None
+            if progress and checkpoint and checkpoint.get('objective_completion') in {'reviewed', 'disposed'}:
+                progress = self._increment(catalog, progress, memory_inputs)
+            inputs = [{'ref': r, **v} for r, v in memory_inputs.items() if not progress or r not in progress['memory']]
+            progress = objective_inventory(catalog, review_objective, previous=progress, selections=sources,
+                                           memory_refs=inputs, binding={'profile': self.profile_id, 'target': target})
+            progress, selections = objective_batch(catalog, progress, profile['budgets'])
+            staging_bytes = progress['batch_read_bytes']
+            profile['sources'] = catalog.resolve(selections)
+            memory_inputs = {r: {'revision': v['revision']} for r, v in progress['memory'].items()}
+        else:
+            profile['sources'] = catalog.resolve(sources)
+        materials, processed, read_bytes = self._collect(profile, previous if same_objective and not progress else None,
                                                        reconsider=bool(reconsider))
+        read_bytes += staging_bytes
+        if progress and previous and same_objective:
+            keys = {e['key'] for m in materials.values() for e in m['events']} | set(memory_inputs)
+            processed.update({k: v for k, v in previous['processed'].items() if k in keys and
+                              (k not in memory_inputs or previous.get('memory_inputs', {}).get(k) == memory_inputs[k])})
         source_revision = _digest({k: v['version'] for k, v in materials.items()})
         source_changes = 'unchanged' if previous and previous['source_revision'] == source_revision else 'changed' if previous else 'initial'
         objective_complete = bool(checkpoint and checkpoint.get('objective_completion') in {'reviewed', 'disposed'})
@@ -394,6 +512,12 @@ class Dreaming:
                 return {'status': 'resume-required', 'run_id': active['run_id'], 'model_required': False}
             basis = self._basis(profile)
             fingerprint = _digest({'sources': source_revision, 'basis': basis})
+            if (progress and checkpoint and same_objective and objective_complete and not reconsider and
+                    objective_observe(progress)['objective_completion'] == 'reviewable-complete'):
+                return {'status': 'no-change', 'model_required': False, 'checkpoint': checkpoint,
+                        'review_objective': review_objective, 'objective_completion': checkpoint['objective_completion'],
+                        'objective_progress': objective_observe(progress), 'source_changes': 'unchanged',
+                        'pending_review': 0, 'unresolved_effects': 0}
             if (checkpoint and same_objective and objective_complete and checkpoint['fingerprint'] == fingerprint and not reconsider and
                     not checkpoint.get('unprocessed_events') and not checkpoint.get('pending_review')):
                 unchecked = [sid for sid, m in materials.items() if not m.get('snapshot_checked')]
@@ -421,6 +545,10 @@ class Dreaming:
                    'previous_run': previous['id'] if previous else None,
                    'review_objective': deepcopy(review_objective), 'objective_completion': 'pending',
                    'source_changes': source_changes}
+            if progress:
+                from .dream_incremental import save_objective
+                run.update(objective_progress=save_objective(self.store, progress), memory_inputs=memory_inputs,
+                           objective_path=objective_path)
             self._save(run)
             _put(self.store, active_path, {'run_id': run_id})
             return {'status': 'created', 'run_id': run_id, 'generation': 1, 'coverage': run['coverage'],
@@ -429,7 +557,8 @@ class Dreaming:
                     'budgets': {k: v for k, v in profile['budgets'].items() if k in INVOCATION_BUDGET_KEYS},
                     'review_objective': deepcopy(review_objective), 'objective_completion': 'pending',
                     'pending_review': sum(value == 'pending-review' for value in processed.values()),
-                    'unresolved_effects': 0, 'source_changes': source_changes}
+                    'unresolved_effects': 0, 'source_changes': source_changes,
+                    **({'objective_progress': objective_observe(progress)} if progress else {})}
 
     def inspect(self, run_id):
         self._policy()
@@ -442,6 +571,9 @@ class Dreaming:
                           source_changes=run.get('source_changes', 'unknown'),
                           pending_review=sum(v == 'pending-review' for v in run['processed'].values()),
                           unresolved_effects=len(run['unresolved']))
+            if run.get('objective_progress'):
+                from .dream_incremental import objective_observe
+                result['objective_progress'] = objective_observe(self._progress(run))
             if (run['policy_revision'] != _digest(read_json(self.store, POLICY)) or
                     run['basis']['dispositions'] != _digest(dispositions(self.store))):
                 result.update(issues=[], unresolved=[], access='changed; semantic excerpts withheld')
@@ -489,8 +621,9 @@ class Dreaming:
         reconstructed = read_source(spec, max_bytes=version['consumed'], max_events=1024, cursor=initial)
         whole = next((e for e in reconstructed['events'] if e['key'] == event_key), None)
         identity = lambda e: {k: v for k, v in e.items() if k not in {'text', 'excerpt_truncated'}}
+        verification = [0]
         if (reconstructed['version'] != version or whole is None or identity(whole) != identity(frozen)
-                or check_snapshot(spec, version) != 'valid'):
+                or check_snapshot(spec, version, verification=verification) != 'valid'):
             _fail('source_changed', 'Source bytes or their public interpretation differ from the frozen event')
         text = whole['text']
         text_digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
@@ -513,15 +646,21 @@ class Dreaming:
             if (current['materials'][source_id]['version'] != version or not self._catalog().authorized(spec)
                     or self._forbidden_source(current, frozen)):
                 _fail('dream_access_denied', 'Frozen source access changed during material reconstruction')
+            reads = current.get('material_reads', {})
+            prior = reads.get(event_key, {})
+            if current.get('objective_progress') and (offset == 0 or prior.get('end') == offset and prior.get('text_sha256') == text_digest):
+                reads[event_key] = {'end': end, 'text_sha256': text_digest, 'complete': end == len(text)}
+                current['material_reads'] = reads
+                self._save(current)
         part = deepcopy(frozen)
         part['text'] = text[offset:end]
         result['sources'][source_id]['events'] = [part]
-        page_bytes = version['consumed'] - version.get('start', 0)
+        page_bytes = reconstructed['coverage']['read_bytes']
         result['page'] = {'event_key': event_key, 'offset': offset, 'end': end, 'total_chars': len(text),
                           'text_sha256': text_digest,
                           'next_cursor': 'material-v1:' + _json({'binding': binding, 'text_sha256': text_digest, 'offset': end}) if end < len(text) else None,
                           'read_bytes': page_bytes,
-                          'verification_bytes': (3 if spec.get('_catalog_page') else 2) * page_bytes + reconstructed['coverage'].get('structure_bytes', 0),
+                          'verification_bytes': reconstructed['coverage']['verification_bytes'] + verification[0],
                           'notice': 'Text availability only; frozen coverage and semantic review are unchanged.'}
         return result
 
@@ -532,11 +671,9 @@ class Dreaming:
         with self.store._gate():
             run = self._run(run_id)
             _, profile = self._policy()
-            uris = {Path(s['path']).as_uri() for s in self._effective(run)['sources']}
             allowed = record_use_filter(self.store)
             records = [r for r in projected_records(self.store, run['target'])
-                       if r['scope'] == 'project' and r['effective_status'] == 'active' and allowed(r)
-                       and all(s['uri'] in uris for s in r['sources'])]
+                       if r['scope'] == 'project' and r['effective_status'] == 'active' and allowed(r)]
             records = self.store._rank(records, query) if query else records
             items, used = [], 0
             for record in records[:limit]:
@@ -546,7 +683,7 @@ class Dreaming:
                     items.append(item)
                     used += size
             return {'target': run['target'], 'items': items, 'chars': used,
-                    'notice': 'Existing memory is navigation, not new independent evidence; recheck its original sources.'}
+                    'notice': 'Reviewed memory is a qualified consolidation input, not new independent evidence; check a current owner when making current-status or action claims.'}
 
     def takeover(self, run_id, expected_generation):
         """Explicit operator continuation. Never a model-facing automatic takeover."""
@@ -603,19 +740,11 @@ class Dreaming:
                 record = next((r for r in projected_records(self.store, run['target']) if r['id'] == identifier), None)
                 if not record or record['effective_status'] != 'active' or not record_use_filter(self.store)(record):
                     _fail('dependency_inactive', 'A referenced project record is not active and usable')
-                inner = []
-                for source in record['sources']:
-                    matches = [e['key'] for e in all_events.values()
-                               if e['source_id'] in source_specs and
-                               Path(source_specs[e['source_id']]['path']).as_uri() == source['uri'] and
-                               (not source.get('locator') or source['locator'] in {e.get('locator'), str(e['event_id'])})]
-                    if not matches:
-                        _fail('unverifiable_source', 'Record source is outside the frozen authorized working set')
-                    inner.extend(matches)
                 dependencies[ref] = {'type': 'record', 'id': identifier, 'revision': _digest(record),
+                                     'sources': record['sources'],
                                      'level': 'hypothesis' if record['kind'] == 'hypothesis' or
                                      record['details'].get('statement_type') in {'hypothesis', 'interpretation'} else
-                                     'report' if any(s.get('note', '').startswith('dream-source-v1:') and
+                                     'report' if record['body'].startswith('[report] ') or any(s.get('note', '').startswith('dream-source-v1:') and
                                                      _decode(s['note'][len('dream-source-v1:'):]).get('claim_level') == 'report'
                                                      for s in record['sources']) else None}
             elif kind == 'collaboration':
@@ -623,14 +752,14 @@ class Dreaming:
                 if (not record or record['effective_status'] != 'active' or
                         run['target'] not in set(policy['collaboration_projects']).intersection(record['claim']['projects'])):
                     _fail('dependency_inactive', 'Collaboration reference is not active or permitted for this project')
-                inner = record['claim']['refs']
+                shaped = {**record, 'project_id': run['target'], 'title': record['claim']['topic']}
+                if not record_use_filter(self.store, scope='collaboration')(shaped):
+                    _fail('source_forbidden', 'The reviewed collaboration source binding was revoked')
                 dependencies[ref] = {'type': 'collaboration', 'id': identifier, 'revision': _digest(record),
+                                     'sources': record['sources'],
                                      'level': record['claim']['level'], 'claim': record['claim']}
             else:
                 _fail('unverifiable_source', 'Unsupported reference kind')
-            nested_events, nested_deps = self._refs(run, inner, scope=scope, visited=visited | {ref})
-            events.update(nested_events)
-            dependencies.update(nested_deps)
         return events, dependencies
 
     def _admit(self, run, claim, review, *, scope, active=True):
@@ -639,9 +768,16 @@ class Dreaming:
         if run['target'] not in claim['projects'] or not set(claim['scenarios']) <= set(profile['scenarios']):
             _fail('scope_mismatch', 'Claim applicability exceeds the selected target or scenarios')
         events, dependencies = self._refs(run, claim['refs'], scope=scope)
-        if not events:
-            _fail('unverifiable_source', 'A claim needs original frozen source evidence')
+        if not events and not dependencies:
+            _fail('unverifiable_source', 'A claim needs frozen evidence or an active reviewed memory')
         source_keys = set(events)
+        for ref, dependency in dependencies.items():
+            source_keys.add(ref)
+            for source in dependency['sources']:
+                source_keys.add('source-uri:' + source['uri'])
+                if source.get('note', '').startswith('dream-source-v1:'):
+                    note = _decode(source['note'][len('dream-source-v1:'):])
+                    source_keys.update([note['event_key'], 'source:' + note['source_id'], *note.get('lineage', [])])
         for e in events.values():
             spec = next(s for s in run['profile_snapshot']['sources'] if s['id'] == e['source_id'])
             source_keys.update(['source:' + e['source_id'], 'source-uri:' + Path(spec['path']).as_uri(), *e.get('lineage', [])])
@@ -659,12 +795,17 @@ class Dreaming:
                 _fail('scope_mismatch', 'Collaboration is Pein-specific and centrally bounded')
             if any(e['human'] != 'attested-Pein' for e in events.values()):
                 _fail('human_attribution_required', 'Role, repetition and writing style are not Pein attribution')
+            if any(d['type'] != 'collaboration' for d in dependencies.values()):
+                _fail('human_attribution_required', 'Research memories cannot establish personal attribution')
+            if claim['level'] == 'explicit' and any(d['level'] != 'explicit' for d in dependencies.values()):
+                _fail('evidence_upgrade', 'An inferred preference cannot become an explicit user statement')
             if active and claim['level'] == 'inferred' and not profile['allow_inferred']:
                 _fail('pending_review', 'Inferred publication is disabled by policy')
         else:
             if claim['level'] in {'explicit', 'inferred'}:
                 _fail('scope_mismatch', 'Personal preferences belong to the collaboration owner')
-            if claim['level'] == 'recorded' and not any(e['evidence'] == 'owner' for e in events.values()):
+            if (claim['level'] == 'recorded' and not any(e['evidence'] == 'owner' for e in events.values())
+                    and not any(d['type'] == 'record' and d['level'] is None for d in dependencies.values())):
                 _fail('evidence_upgrade', 'Public Agent reports are not independently verified owner results')
             if claim['level'] != 'hypothesis' and any(d['level'] == 'hypothesis' for d in dependencies.values()):
                 _fail('evidence_upgrade', 'A view cannot promote a hypothesis into a conclusion')
@@ -685,9 +826,14 @@ class Dreaming:
             if run['phase'] == 'closed':
                 _fail('closed_run', 'Closed coverage cannot be rewritten')
             events = self._events(run)
+            empty_sources = {'source:' + sid for sid, m in run['materials'].items() if not m['events'] and m.get('version')}
+            memory_inputs = run.get('memory_inputs', {})
+            current_inputs = self._memory_inputs(run['target'], self._policy()[0]) if memory_inputs else {}
             for key, status in statuses.items():
-                if key not in events or status not in {'processed', 'excluded', 'no-signal', 'pending-review'}:
+                if key not in set(events) | empty_sources | set(memory_inputs) or status not in {'processed', 'excluded', 'no-signal', 'pending-review'}:
                     _fail('invalid_input', 'Coverage must identify frozen events and explicit processing states')
+                if key in memory_inputs and current_inputs.get(key) != memory_inputs[key]:
+                    _fail('stale_dependency', 'Memory review must bind the frozen canonical revision')
             run['processed'].update(statuses)
             self._save(run)
             return {'status': 'recorded', 'processed': run['processed']}
@@ -774,9 +920,13 @@ class Dreaming:
             draft = {'version': 1, 'run_id': run_id, 'serial': serial, 'operations': ops,
                      'basis': basis, 'source_revision': run['source_revision'],
                      'review_executor': self.caller, 'reconsider_reason': reconsider_reason}
+            created_refs = list(resolved_refs.values())
+            draft['created_refs'] = created_refs
+            draft['operation_bases'] = {o['id']: self._operation_basis(run, o, created_refs) for o in ops}
             revision = _digest(draft)
             _put(self.store, f'dreaming/runs/{run_id}/drafts/{revision}.json', draft, immutable=True)
             run.update(current_draft=revision, phase='draft-ready', working_basis=basis, unresolved=[])
+            run['closure_bases'] = deepcopy(draft['operation_bases'])
             run['drafts'].append(revision)
             self._save(run)
             return {'status': 'frozen', 'run_id': run_id, 'generation': generation, 'draft_revision': revision,
@@ -829,16 +979,28 @@ class Dreaming:
         from .dream_sources import check_snapshot
         _, profile = self._policy()
         specs = {s['id']: s for s in self._effective(run)['sources']}
-        cost = sum((m.get('version') or {}).get('consumed', 0) - (m.get('version') or {}).get('start', 0) for m in run['materials'].values())
+        cost = 0
+        for sid, material in run['materials'].items():
+            version = material.get('version') or {}
+            consumed = version.get('consumed', 0)
+            if specs.get(sid, {}).get('_catalog_page'):
+                cost += consumed - version.get('start', 0) + (consumed if 'prefix_sha256' in version else 0)
+                cost += version.get('cutoff', 0) if version.get('structure_sha256') else 0
+            else:
+                cost += consumed + (version.get('cutoff', 0) if version.get('structure_raw_sha256') else 0)
+        limit = min(profile['budgets']['source_bytes'], run['profile_snapshot']['budgets']['source_bytes'])
+        if cost > limit:
+            _fail('source_budget_exhausted', 'Source verification exceeds the per-transaction byte bound')
+        verification = [0]
+        checks = {sid: check_snapshot(specs[sid], material['version'], verification=verification) if sid in specs else 'forbidden'
+                  for sid, material in run['materials'].items()}
         with self.store._gate():
             current = self._run(run['id'], run['generation'])
-            limit = min(profile['budgets']['source_bytes'], run['profile_snapshot']['budgets']['source_bytes'])
-            if cost > limit:
-                _fail('source_budget_exhausted', 'Source verification exceeds the per-transaction byte bound')
-            current['read_bytes'] = current.get('read_bytes', 0) + cost
+            current['read_bytes'] = current.get('read_bytes', 0) + verification[0]
             self._save(current)
-        return {sid: check_snapshot(specs[sid], material['version']) if sid in specs else 'forbidden'
-                for sid, material in run['materials'].items()}
+        if verification[0] > limit:
+            _fail('source_budget_exhausted', 'Concurrent source verification exceeded its transaction bound')
+        return checks
 
     def _effect(self, run, operation, source_checks):
         policy, profile = self._policy()
@@ -852,12 +1014,12 @@ class Dreaming:
             review = operation['review']
             if review['decision'] != 'approve' or not review['scope_checked'] or not review['counterexamples_checked']:
                 _fail('pending_review', 'Withdrawal requires explicit reviewed evidence')
-            events, _ = self._refs(run, review['checked_refs'], scope=scope)
+            events, dependencies = self._refs(run, review['checked_refs'], scope=scope)
         else:
             active = operation.get('visibility', 'active') == 'active'
             if operation['action'] == 'collaboration_create' and operation['claim']['level'] == 'inferred':
                 active = False
-            events, _ = self._admit(run, operation['claim'], operation['review'], scope=scope, active=active)
+            events, dependencies = self._admit(run, operation['claim'], operation['review'], scope=scope, active=active)
         if operation['action'] == 'record_approve':
             current = next((r for r in projected_records(self.store, run['target']) if r['id'] == operation['record_id']), None)
             if not current or current['effective_status'] != 'candidate' or current.get('recall_retired'):
@@ -876,7 +1038,7 @@ class Dreaming:
                 if not matching:
                     _fail('unverifiable_source', 'Every original candidate source requires authorized frozen evidence in checked refs')
                 events.update({event['key']: event for event in matching})
-        if not events:
+        if not events and not dependencies:
             _fail('unverifiable_source', 'Publication requires source evidence')
         if any(source_checks.get(e['source_id']) != 'valid' for e in events.values()):
             _fail('stale_source', 'A source snapshot is changed, missing or inaccessible; re-read its owner')
@@ -889,6 +1051,7 @@ class Dreaming:
                                                    'source_spec': compact_source_spec(specs[e['source_id']]),
                                                    'claim_level': operation.get('claim', {}).get('level')})}
                 for e in events.values()]
+        uris.extend(source for dependency in dependencies.values() for source in dependency['sources'])
         uris = list({_digest(s): s for s in uris}.values())
         if scope == 'collaboration':
             existing = {r['id']: r for r in collaboration(self.store)}
@@ -944,9 +1107,12 @@ class Dreaming:
             else:
                 complete = False
             if not complete:
-                if self._basis(self._effective(run)) != run['working_basis']:
+                if 'operation_bases' in draft:
+                    if self._operation_basis(run, operation, draft['created_refs']) != draft['operation_bases'][operation_id]:
+                        _fail('stale_basis', 'A reviewed input, target binding or applicable policy changed')
+                elif self._basis(self._effective(run)) != run['working_basis']:
                     _fail('stale_basis', 'Canonical namespace, policy, registry or disposition changed after review')
-                if draft['basis']['policy'] != _digest(policy):
+                if 'operation_bases' not in draft and draft['basis']['policy'] != _digest(policy):
                     _fail('stale_policy', 'Frozen draft policy is no longer current')
                 if '_failure' in source_checks:
                     _fail(source_checks['_failure'], 'Source revalidation budget unavailable; completed effects remain recoverable')
@@ -1018,6 +1184,8 @@ class Dreaming:
             run['receipts'][key] = receipt
             # Advance ONLY the effects this intent proves; never absorb other writers.
             run['working_basis'] = intent['after_basis']
+            if 'operation_bases' in draft:
+                run['closure_bases'][operation_id] = self._operation_basis(run, operation, draft['created_refs'])
             run['phase'] = 'applying'
             self._save(run)
             self._fault('receipt-written', operation)
@@ -1063,8 +1231,10 @@ class Dreaming:
         with self.store._gate():
             run = self._run(run_id, generation)
             if run['phase'] == 'closed':
-                if run.get('checkpoint') and self._basis(self._effective(run)) == run['working_basis']:
+                if run.get('checkpoint') and (run.get('objective_progress') or self._basis(self._effective(run)) == run['working_basis']):
                     _put(self.store, f'dreaming/checkpoints/{self.profile_id}-{run["lane"]}.json', run['checkpoint'])
+                    if run.get('objective_path'):
+                        _put(self.store, run['objective_path'], {'run_id': run_id})
                 return {'status': 'closed', 'replayed': True, 'run_id': run_id}
             outstanding = []
             if run['current_draft']:
@@ -1087,6 +1257,10 @@ class Dreaming:
                 _nonempty(abandon_reason, 'abandon_reason')
             current_basis = self._basis(self._effective(run))
             basis_changed = current_basis != run['working_basis']
+            if run.get('closure_bases'):
+                draft = self._draft(run, run['current_draft'])
+                basis_changed = any(self._operation_basis(run, op, draft['created_refs']) != run['closure_bases'][op['id']]
+                                    for op in draft['operations'])
             if not outstanding and basis_changed and not abandon_reason:
                 _fail('stale_basis', 'External changes require review or explicit partial close without a no-change checkpoint')
             missing = set(self._events(run)) - set(run['processed'])
@@ -1104,14 +1278,34 @@ class Dreaming:
                                      'source_versions': {k: v['version'] for k, v in run['materials'].items()},
                                      'unprocessed_events': len(missing), 'review_objective': run.get('review_objective'),
                                      'objective_completion': run['objective_completion']}
+                if run.get('objective_progress'):
+                    from .dream_incremental import objective_close, objective_observe, save_objective
+                    progress = objective_close(self._progress(run), run)
+                    # Reviewed effects are already included in this objective;
+                    # do not manufacture another increment from our own outputs.
+                    current_inputs = self._memory_inputs(run['target'], self._policy()[0])
+                    for ref in progress['memory']:
+                        if progress['memory'][ref]['status'] in {'processed', 'excluded', 'no-signal'} and ref in current_inputs:
+                            progress['memory'][ref]['revision'] = current_inputs[ref]['revision']
+                    for receipt in run['receipts'].values():
+                        for path in receipt['paths']:
+                            ref = ('record:' if path.startswith('records/') else 'collaboration:' if path.startswith('collaboration/') else '') + Path(path).stem
+                            if ref in current_inputs:
+                                progress['memory'][ref] = {**current_inputs[ref], 'status': 'processed'}
+                    if objective_outcome and objective_observe(progress)['objective_completion'] != 'reviewable-complete':
+                        _fail('pending_objective', 'Historical sources, memories or explicit gaps still need review')
+                    run['objective_progress'] = save_objective(self.store, progress)
             self._save(run)
             self._fault('run-closed', {'id': 'close'})
             if run.get('checkpoint'):
                 _put(self.store, f'dreaming/checkpoints/{self.profile_id}-{run["lane"]}.json', run['checkpoint'])
+                if run.get('objective_path'):
+                    _put(self.store, run['objective_path'], {'run_id': run_id})
             return {'status': 'closed', 'run_id': run_id, 'coverage': run['coverage'],
                     'pending_review': pending, 'unprocessed_events': len(missing), 'partial': bool(outstanding or basis_changed),
                     'review_objective': run.get('review_objective'), 'objective_completion': run['objective_completion'],
-                    'unresolved_effects': len(outstanding)}
+                    'unresolved_effects': len(outstanding),
+                    **({'objective_progress': objective_observe(progress)} if run.get('objective_progress') and run.get('checkpoint') else {})}
 
     def changes(self, run_id, *, max_bytes=12000):
         """Readable bounded differences within the current objective and source grants."""

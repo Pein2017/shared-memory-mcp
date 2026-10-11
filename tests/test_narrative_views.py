@@ -52,7 +52,7 @@ def test_compact_default_is_useful_and_qualified(tmp_path):
 def test_unrelated_source_drift_marks_only_its_unit(tmp_path):
     engine, _, _, branch = account(tmp_path)
     before = engine.overview('research', scenario='research')
-    branch.write_text(branch.read_text() + '\nA separate direction is preparing.\n')
+    branch.write_text(branch.read_text().replace('active', 'paused'))
     after = engine.overview('research', scenario='research')
     assert after['as_of'] == before['as_of']
     assert 'Finite-panel fit' in after['text'] and 'Airport route active' in after['text']

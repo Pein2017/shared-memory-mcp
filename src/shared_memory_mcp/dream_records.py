@@ -6,6 +6,7 @@ an explicitly versioned collection; it is not a registered Git project.
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 from .core import HARNESSES, MAX_RECORD_BYTES, MAX_RECORDS, RECORD_ID, _decode, _digest, _fail, _json, _keys, _nonempty, _now, _sources, _utc
@@ -77,7 +78,9 @@ def render_claim(claim, *, compact=False):
         lines.append('Exceptions: ' + '; '.join(claim['exceptions']))
     if claim['counterevidence']:
         lines.append('Counterevidence: ' + '; '.join(claim['counterevidence']))
-    lines.append('Sources: ' + ', '.join(claim['refs']))
+    refs = [ref for ref in claim['refs'] if not compact or not re.fullmatch(r'[0-9a-fA-F]{64}', ref)]
+    if refs:
+        lines.append('Sources: ' + ', '.join(refs))
     return '\n'.join(lines)
 
 

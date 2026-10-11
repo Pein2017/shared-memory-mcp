@@ -71,15 +71,13 @@ def test_symlink_components_and_replaced_directory_fenced(tmp_path):
     assert check_snapshot(spec,page['version'])=='unverifiable'
 
 
-@pytest.mark.parametrize('change',['append','replace','edit'])
+@pytest.mark.parametrize('change',['replace','edit'])
 def test_frozen_page_epoch_rejects_mutation_for_cursor_and_publication(tmp_path,change):
     c,_,path=catalog(tmp_path,values=[HEADER,codex_message('One'),codex_message('Two',identifier='u2')])
     page=c.read({'grant_id':'history','path':'a.jsonl'},max_events=1)
     spec=c.resolve([page['selection']])[0]
     before=path.stat()
-    if change=='append':
-        with path.open('ab') as f:f.write(line(codex_message('Later',identifier='u3')))
-    elif change=='replace':
+    if change=='replace':
         replacement=path.with_name('new');replacement.write_bytes(path.read_bytes());replacement.replace(path)
     else:
         path.write_bytes(path.read_bytes().replace(b'One',b'Ono'))
@@ -208,14 +206,14 @@ def test_page_descriptor_retains_no_transcript_and_identity_is_stable(tmp_path):
     assert read_source(spec)['events'][0]['text']==marker
 
 
-def test_accepted_source_entitlement_survives_append_but_page_is_stale(tmp_path):
+def test_accepted_source_entitlement_and_consumed_page_survive_append(tmp_path):
     c,_,path=catalog(tmp_path)
     page=c.read({'grant_id':'history','path':'a.jsonl'})
     spec=c.resolve([page['selection']])[0]
     with path.open('ab') as stream:stream.write(line(codex_message('Later',identifier='u2')))
     assert c.authorized(spec)
-    assert check_snapshot(spec,page['version'])=='stale'
-    with pytest.raises(MemoryError):read_source(spec)
+    assert check_snapshot(spec,page['version'])=='valid'
+    assert read_source(spec)['events']==page['events']
 
 
 def test_catalog_handle_eviction_keeps_live_continuation_and_run_descriptor(tmp_path,monkeypatch):

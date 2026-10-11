@@ -4,10 +4,10 @@ import json
 
 import pytest
 
-from dreaming_helpers import begin, claim, environment, freeze_publish, review, view_op
+from dreaming_helpers import begin, claim, environment, freeze_publish, record_op, review, view_op
 from shared_memory_mcp.core import MemoryError, _digest
 from shared_memory_mcp.dreaming import Dreaming, configure_policy
-from shared_memory_mcp import dream_views
+from shared_memory_mcp import dream_views, view_units
 
 
 def published(tmp_path, *, collaboration=False):
@@ -77,14 +77,16 @@ def test_relevant_revocation_blocks_current_and_historical_views(tmp_path, monke
     else:
         updated['collaboration_projects'] = []
     kind = 'collaboration' if is_collab else 'research'
-    original_check = dream_views.check_snapshot
+    original_check = view_units.read_json if is_collab else dream_views.check_snapshot
     for historical in [None, current['revision']]:
         if during_io:
-            def revoke(spec, version):
-                result = original_check(spec, version)
-                configure_policy(store, updated, expected_revision=_digest(policy))
+            def revoke(*args, **kwargs):
+                result = original_check(*args, **kwargs)
+                if not is_collab or '/revisions/' in str(args[1]):
+                    configure_policy(store, updated, expected_revision=_digest(policy))
                 return result
-            monkeypatch.setattr(dream_views, 'check_snapshot', revoke)
+            monkeypatch.setattr(view_units if is_collab else dream_views,
+                                'read_json' if is_collab else 'check_snapshot', revoke)
         else:
             configure_policy(store, updated, expected_revision=_digest(policy))
         try:
@@ -177,7 +179,7 @@ def test_inferred_collaboration_permission_remains_a_read_dependency(tmp_path):
         assert result['status'] == 'invalidated' and result['text'] == ''
 
 
-def test_unrelated_policy_edit_still_blocks_frozen_view_publication(tmp_path):
+def test_unrelated_policy_edit_preserves_frozen_view_publication(tmp_path):
     engine, store, _, _, policy, _, _ = environment(tmp_path)
     rid, gen, source, _ = begin(engine)
     draft = engine.freeze(rid, gen, [view_op('V', claim(source))])
@@ -185,9 +187,93 @@ def test_unrelated_policy_edit_still_blocks_frozen_view_publication(tmp_path):
     updated['profiles']['unrelated'] = deepcopy(updated['profiles']['fixture'])
     configure_policy(store, updated, expected_revision=_digest(policy))
     result = engine.publish(rid, gen, draft['draft_revision'])
-    assert result['status'] == 'blocked'
-    assert result['unresolved'][0]['code'] == 'stale_basis'
-    assert engine.overview('research', scenario='research')['status'] == 'navigation'
+    assert result['status'] == 'applied', result
+    assert engine.overview('research', scenario='research')['status'] == 'valid'
+
+
+@pytest.mark.parametrize('change', ['grant', 'scenario', 'target', 'executor'])
+def test_memory_only_view_revocation_during_dependency_read_fails_closed(tmp_path, monkeypatch, change):
+    engine, store, _, _, policy, _, _ = environment(tmp_path)
+    rid, gen, key, _ = begin(engine)
+    c = claim(key)
+    vc = {**c, 'refs': ['op:P']}
+    _, result = freeze_publish(engine, rid, gen, [record_op('P', c), view_op('V', vc)])
+    assert result['status'] == 'applied', result
+    current = engine.overview('research', scenario='research')
+    updated = deepcopy(policy)
+    profile = updated['profiles']['fixture']
+    if change == 'grant':
+        profile['source_grants'] = profile['source_grants'][1:]
+    elif change == 'scenario':
+        profile['scenarios'].remove('research')
+    elif change == 'target':
+        profile['target_projects'] = ['runner']
+    else:
+        profile['executor_projects'] = ['demo']
+    original = view_units.read_json
+    calls = []
+    def revoke(*args, **kwargs):
+        document = original(*args, **kwargs)
+        if '/revisions/' in str(args[1]):
+            calls.append(True)
+            configure_policy(store, updated, expected_revision=_digest(policy))
+        return document
+    for historical in [None, current['revision']]:
+        monkeypatch.setattr(view_units, 'read_json', revoke)
+        try:
+            view = engine.overview('research', scenario='research', historical=historical, target_project='demo')
+        except MemoryError as error:
+            assert error.code == 'dream_access_denied'
+        else:
+            assert view['text'] == ''
+            assert view['status'] in {'invalidated', 'navigation'}
+        configure_policy(store, policy, expected_revision=_digest(updated))
+    assert len(calls) == 2
+
+
+def test_memory_only_view_does_not_reopen_missing_original_sources(tmp_path, monkeypatch):
+    engine, store, _, _, _, owner, _ = environment(tmp_path)
+    rid, gen, key, _ = begin(engine)
+    c = claim(key)
+    _, result = freeze_publish(engine, rid, gen, [record_op('P', c), view_op('V', {**c, 'refs': ['op:P']})])
+    assert result['status'] == 'applied', result
+    owner.unlink()
+    def raw_read(*args, **kwargs):
+        raise AssertionError('Reviewed memory dependency must not reopen raw history')
+    monkeypatch.setattr(dream_views, 'check_snapshot', raw_read)
+    view = engine.overview('research', scenario='research')
+    assert view['status'] == 'valid' and c['text'] in view['text']
+    document = json.loads((store.root / f"dreaming/views/demo/research/revisions/{view['revision']}.json").read_text())
+    assert document['sources'] == {}
+    assert all(dep['sources'] for dep in document['dependencies'].values())
+
+
+@pytest.mark.parametrize('memory_only', [False, True])
+def test_inherited_access_revocation_is_a_view_policy_dependency(tmp_path, memory_only):
+    engine, store, _, _, policy, owner, _ = environment(tmp_path)
+    inherited = deepcopy(policy)
+    inherited['profiles']['fixture']['read_access'] = 'inherited'
+    configure_policy(store, inherited, expected_revision=_digest(policy))
+    page = engine.source_read({'absolute_path': str(owner), 'format': 'document', 'schema': 'document-v1'})
+    run = engine.start(sources=[page['selection']])
+    key = page['events'][0]['key']
+    c = claim(key)
+    operations = ([record_op('P', c), view_op('V', {**c, 'refs': ['op:P']})] if memory_only
+                  else [view_op('V', c)])
+    _, result = freeze_publish(engine, run['run_id'], run['generation'], operations)
+    assert result['status'] == 'applied', result
+    current = engine.overview('research', scenario='research')
+    document = json.loads((store.root / f"dreaming/views/demo/research/revisions/{current['revision']}.json").read_text())
+    if memory_only:
+        owner.unlink()
+        assert engine.overview('research', scenario='research')['text'] == current['text']
+    revoked = deepcopy(inherited)
+    revoked['profiles']['fixture']['read_access'] = 'granted'
+    assert not dream_views._policy_matches(document, revoked, revoked['profiles']['fixture'])
+    configure_policy(store, revoked, expected_revision=_digest(inherited))
+    for historical in [None, current['revision']]:
+        denied = engine.overview('research', scenario='research', historical=historical)
+        assert denied['text'] == '' and denied['status'] == 'invalidated'
 
 
 def test_pi_view_persists_ancestry_proof_and_legacy_view_is_unverifiable(tmp_path):

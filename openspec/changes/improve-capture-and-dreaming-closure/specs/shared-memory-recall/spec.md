@@ -29,3 +29,14 @@ Reader guidance SHALL encourage successive relevant batches without a cumulative
 #### Scenario: The evidence need is satisfied or access remains blocked
 - **WHEN** required task evidence and decisive qualifiers have been reviewed, or a concrete access, version, structure or backend limit prevents the remaining dependent read
 - **THEN** the reader can stop with the scoped conclusion or explicit unresolved gap, without claiming broader coverage or consuming unrelated material merely to exhaust a cursor
+
+### Requirement: Semantic accounts retain internal integrity fences
+Ordinary memory accounts SHALL emphasize qualified semantic content and human-readable source routes rather than exposed source-digest inventories. Returned references SHALL remain usable as opaque handles, with detailed integrity metadata available for audit. Internal range/revision checks SHALL retain relevant concurrency, idempotent replay and recovery protection; they MUST NOT serve as semantic truth conditions or force old knowledge to be requalified merely because unrelated bytes or namespace/policy state changed. Relevant revocation, changed consumed evidence and competing edits to the same target SHALL still reject stale operations. Sealed historical receipts MUST NOT be rewritten to admit changed content.
+
+#### Scenario: Unrelated changes occur during consolidation
+- **WHEN** a source appends outside the consumed range or an unrelated record/policy entry changes while actual input and publication dependencies remain unchanged
+- **THEN** the valid operation remains eligible without requalifying the semantic claim or forcing a whole-corpus reread
+
+#### Scenario: Ordinary recall and detailed audit read the same knowledge
+- **WHEN** ordinary context/search/detail and an explicit audit read retrieve a qualified memory
+- **THEN** ordinary content retains meaning, conditions and usable routes/handles, while the audit can expose internal integrity evidence without changing the claim's evidence level

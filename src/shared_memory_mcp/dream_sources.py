@@ -28,7 +28,7 @@ PI_STRUCTURE_REVISION = 2
 SECRET = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b')
 
 
-def validate_source(source):
+def validate_source(source, *, allow_instructions=False):
     _keys(source, {'id', 'path', 'format', 'schema'},
           {'id', 'path', 'format', 'schema', 'native_version', 'attestations',
            'leaf_id', 'derived', 'lineage'}, 'dream source')
@@ -39,7 +39,7 @@ def validate_source(source):
     if not isinstance(source['path'], str) or len(source['path']) > 4096 or '\x00' in source['path']:
         _fail('unsafe_source', 'Source path must be a bounded string')
     p = Path(source['path'])
-    if not p.is_absolute() or '..' in p.parts or p.name in {'AGENTS.md', 'SKILL.md', '.env'}:
+    if not p.is_absolute() or '..' in p.parts or p.name == '.env' or (not allow_instructions and p.name in {'AGENTS.md', 'SKILL.md'}):
         _fail('unsafe_source', 'Source must be an explicit absolute non-instruction file')
     if source['format'] == 'claude' or 'native_version' in source:
         _nonempty(source.get('native_version'), 'source.native_version')
@@ -162,6 +162,31 @@ def _source_epoch(st):
     return [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
 
 
+def _range_digest(stream, end, start=0):
+    """Hash a frozen range in bounded chunks without changing the caller's position."""
+    position = stream.tell()
+    digest = hashlib.sha256()
+    try:
+        stream.seek(start)
+        remaining = end - start
+        if remaining < 0:
+            _fail('source_changed', 'Invalid frozen source range')
+        while remaining:
+            part = stream.read(min(65536, remaining))
+            if not part:
+                _fail('source_changed', 'Frozen source range is unavailable')
+            digest.update(part)
+            stream._dream_verification_bytes = getattr(stream, '_dream_verification_bytes', 0) + len(part)
+            remaining -= len(part)
+        return digest.hexdigest()
+    finally:
+        stream.seek(position)
+
+
+def _same_file_range(epoch, frozen, cutoff):
+    return epoch[:2] == frozen[:2] and epoch[2] >= cutoff
+
+
 def _scan_pi_structure(source, stream, cutoff):
     """Rebuild edges and saved resume selection without retaining any payload."""
     if cutoff > MAX_PI_STRUCTURE_BYTES:
@@ -196,6 +221,7 @@ def _scan_pi_structure(source, stream, cutoff):
     metadata = {'parents': state.get('pi_structure', {}), 'valid': bool(state.get('valid')),
                 'leaf': saved_leaf, 'gaps': gaps, 'cutoff': cutoff, 'projection_revision': PI_STRUCTURE_REVISION,
                 'epoch': epoch}
+    metadata['raw_sha256'] = _range_digest(stream, cutoff)
     metadata['sha256'] = _digest(metadata)
     if _source_epoch(os.fstat(stream.fileno())) != epoch:
         _fail('source_changed', 'Pi structure changed during scan')
@@ -353,35 +379,37 @@ def _public(source, raw, line, state, *, raw_digest=None):
             **({'native_version': state['native_version']} if fmt == 'codex' else {})}, None
 
 
-def check_snapshot(source, version):
+def check_snapshot(source, version, *, verification=None):
     """Check a frozen prefix outside the memory writer gate; never return source text."""
     if source.get('_catalog_page'):
         from .dream_catalog import check_page_snapshot
-        return check_page_snapshot(source, version)
+        return check_page_snapshot(source, version, verification=verification)
     if not version:
         return 'unverifiable'
+    stream = None
     try:
         with _open_source(source) as stream:
             st = os.fstat(stream.fileno())
-            if source['format'] == 'pi' and version.get('structure_epoch') != _source_epoch(st):
-                return 'stale'
+            if source['format'] == 'pi':
+                if 'structure_raw_sha256' in version:
+                    if (not _same_file_range(_source_epoch(st), version['structure_epoch'], version['cutoff']) or
+                            _range_digest(stream, version['cutoff']) != version['structure_raw_sha256']):
+                        return 'stale'
+                elif version.get('structure_epoch') != _source_epoch(st):
+                    return 'stale'
             if [st.st_dev, st.st_ino] != version['identity']:
                 return 'unverifiable'
-            if source['format'] == 'document' and st.st_size != version['cutoff']:
+            if st.st_size < version['cutoff']:
                 return 'stale'
             remaining = version['consumed']
             if type(remaining) is not int or not 0 <= remaining <= MAX_BYTES or st.st_size < remaining:
                 return 'unverifiable'
-            digest = hashlib.sha256()
-            while remaining:
-                part = stream.read(min(65536, remaining))
-                if not part:
-                    return 'unverifiable'
-                digest.update(part)
-                remaining -= len(part)
-            return 'valid' if digest.hexdigest() == version['prefix_sha256'] else 'stale'
+            return 'valid' if _range_digest(stream, remaining) == version['prefix_sha256'] else 'stale'
     except (OSError, MemoryError, KeyError, TypeError):
         return 'unverifiable'
+    finally:
+        if verification is not None and stream is not None:
+            verification[0] += getattr(stream, '_dream_verification_bytes', 0)
 
 
 def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refresh_cutoff=False):
@@ -394,7 +422,8 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     if source.get('_catalog_page'):
         from .dream_catalog import materialized_page
         return materialized_page(source)
-    validate_source({k: v for k, v in source.items() if not k.startswith('_')})
+    validate_source({k: v for k, v in source.items() if not k.startswith('_')},
+                    allow_instructions=bool(source.get('_inherited_selection')))
     if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_BYTES or type(max_events) is not int or not 1 <= max_events <= MAX_EVENTS:
         _fail('source_limit', 'Invalid source byte/event budget')
     cursor = dict(cursor or {})
@@ -410,8 +439,8 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
         with _open_source(source) as stream:
             st = os.fstat(stream.fileno())
             identity = [st.st_dev, st.st_ino]
-            cutoff = cursor.get('cutoff', st.st_size)
-            if type(cutoff) is not int or cutoff < offset:
+            cutoff = cursor.get('cutoff', source.get('_source_cutoff', st.st_size))
+            if type(cutoff) is not int or cutoff < offset or cutoff > st.st_size:
                 _fail('source_changed', 'Invalid frozen source cutoff')
             if cursor and (identity != cursor.get('identity') or st.st_size < cutoff):
                 _fail('source_changed', 'Source replaced/truncated; restart from an explicitly reviewed checkpoint')
@@ -439,7 +468,10 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                         source, stream, cutoff, reference=metadata if metadata and 'cache_key' in metadata else None)
                 else:
                     if metadata and metadata['epoch'] != _source_epoch(st):
-                        _fail('source_changed', 'Pi structural snapshot changed')
+                        if (not metadata.get('raw_sha256') or
+                                not _same_file_range(_source_epoch(st), metadata['epoch'], metadata['cutoff']) or
+                                _range_digest(stream, metadata['cutoff']) != metadata['raw_sha256']):
+                            _fail('source_changed', 'Pi structural snapshot changed')
                     if not metadata or metadata['cutoff'] != cutoff:
                         metadata = _scan_pi_structure(source, stream, cutoff)
                         structure_bytes = cutoff
@@ -521,10 +553,14 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
                     _fail('source_changed', 'Source changed during read')
                 verify.update(part)
                 left -= len(part)
-            if (source['format'] == 'pi' and _source_epoch(os.fstat(stream.fileno())) != state['pi_metadata']['epoch']):
-                _fail('source_changed', 'Pi structural snapshot changed during read')
+            if source['format'] == 'pi':
+                metadata = state['pi_metadata']
+                if (not _same_file_range(_source_epoch(os.fstat(stream.fileno())), metadata['epoch'], cutoff) or
+                        _range_digest(stream, cutoff) != metadata.get('raw_sha256')):
+                    _fail('source_changed', 'Pi structural snapshot changed during read')
             if verify.digest() != digest.digest() or os.fstat(stream.fileno()).st_ino != st.st_ino:
                 _fail('source_changed', 'Source changed during read')
+            range_verification_bytes = getattr(stream, '_dream_verification_bytes', 0)
     except OSError as exc:
         _fail('source_unavailable', f'Authorized source unavailable: {type(exc).__name__}; verify its owner/path')
     complete = position == cutoff
@@ -536,6 +572,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     if source['format'] == 'pi':
         version['structure_epoch'] = state['pi_metadata']['epoch']
         version['structure_sha256'] = state['pi_metadata']['sha256']
+        version['structure_raw_sha256'] = state['pi_metadata']['raw_sha256']
     if source['format'] == 'codex':
         version['native_version'] = state.get('native_version')
     for event in events:
@@ -552,7 +589,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
         cursor_state['pi_metadata'] = pi_reference
     return {'source_id': source['id'], 'events': events, 'version': version,
             'coverage': {'discovered_bytes': cutoff, 'read_bytes': scanned - offset,
-                         'verification_bytes': offset + position + structure_bytes + framing_verification_bytes, 'structure_bytes': structure_bytes, 'events': len(events),
+                         'verification_bytes': offset + position + structure_bytes + framing_verification_bytes + range_verification_bytes, 'structure_bytes': structure_bytes, 'events': len(events),
                          'excluded': excluded, 'complete': complete and not gaps, 'gaps': gaps},
             'cursor': {'offset': position, 'cutoff': cutoff, 'identity': identity,
                        'prefix_sha256': digest.hexdigest(), 'line': line, 'state': cursor_state, 'seen': seen,

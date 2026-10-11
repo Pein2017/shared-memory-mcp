@@ -148,7 +148,7 @@ def test_history_append_does_not_change_the_frozen_event(tmp_path):
     assert result['page']['next_cursor'] is None
 
 
-def test_direct_pi_parts_reuse_frozen_structure_and_reject_changed_epoch(tmp_path, monkeypatch):
+def test_direct_pi_parts_reuse_frozen_structure_accept_append_and_reject_consumed_edit(tmp_path, monkeypatch):
     import shared_memory_mcp.dream_sources as sources
     from test_dream_source_regressions import selected_engine
     engine, store, caller, _, policy, _, path = environment(tmp_path)
@@ -174,6 +174,9 @@ def test_direct_pi_parts_reuse_frozen_structure_and_reject_changed_epoch(tmp_pat
     assert ''.join(parts) == text
     with path.open('a') as stream:
         stream.write(json.dumps({'type': 'session_info', 'id': 'B', 'parentId': 'A', 'name': 'Synthetic append'}) + '\n')
+    appended = engine.materials(run['run_id'], 'pi', event_key=event['key'], max_chars=1000)
+    assert appended['sources']['pi']['events'][0]['text'] == text[:1000]
+    path.write_text(path.read_text().replace('Synthetic selected', 'Synthetic rejected'))
     with pytest.raises(MemoryError) as error:
         engine.materials(run['run_id'], 'pi', event_key=event['key'], max_chars=1000)
     assert error.value.code == 'source_changed'
@@ -217,7 +220,7 @@ def test_pi_body_reports_cache_eviction_rebuild_io(tmp_path, monkeypatch, catalo
     consumed.clear()
     repeated = engine.materials(run['run_id'], 'pi', event_key=event['key'])
     assert sum(consumed) == repeated['page']['read_bytes'] + repeated['page']['verification_bytes']
-    assert result['page']['verification_bytes'] - repeated['page']['verification_bytes'] == path.stat().st_size
+    assert result['page']['verification_bytes'] - repeated['page']['verification_bytes'] == 2 * path.stat().st_size
 
 
 @pytest.mark.parametrize('mode', ['fixed', 'general', 'gateway'])

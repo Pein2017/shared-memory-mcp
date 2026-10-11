@@ -40,9 +40,10 @@ def exposure_size(packet):
 
 
 def record_unit(record):
+    from .recall import semantic_body, source_label
     details = record.get('details', {})
     unit = metadata(record)
-    text = unit.get('compact') or details.get('summary') or record['body']
+    text = semantic_body(unit.get('compact') or details.get('summary') or record['body'])
     level = details.get('statement_type', record['kind'])
     assurance = details.get('extensions', {}).get('live_review', {}).get('assurance')
     when = record.get('review', {}).get('reviewed_at', record['created_at'])
@@ -51,6 +52,11 @@ def record_unit(record):
         body += '\nConditions: ' + details['conditions']
     if assurance:
         body += '\nSource assurance: ' + assurance + '; not authenticated human identity.'
+    if record['sources']:
+        routes = [source_label(source) for source in record['sources'][:2]]
+        if len(record['sources']) > len(routes):
+            routes.append(f"{len(record['sources']) - len(routes)} more in full detail")
+        body += '\nSource routes: ' + '; '.join(routes)
     body += '\nSource/read: record:' + record['id']
     return {'id': record['id'], 'unit_id': unit.get('id', record['id']), 'role': unit.get('role', 'evidence'),
             'level': level, 'text': body, 'as_of': when, 'task_modes': details.get('task_modes', []),
@@ -99,7 +105,7 @@ def read_basis(store, project_id):
 def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None,
             max_bytes=DEFAULT_BYTES, mode_restriction=None, previous_revision=None, token_counter=None,
             current_status=False):
-    from .recall import collect, load_routing, rank, route_matches
+    from .recall import collect, load_routing, ordinary_source, rank, route_matches, source_label
     validate_mode(task_mode, mode_restriction)
     if type(current_status) is not bool:
         _fail('invalid_input', 'current_status must be an explicit boolean')
@@ -160,8 +166,14 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
             if modes and task_mode not in modes:
                 continue
             n = c.get('narrative', {})
+            text = render_claim(c, compact=True)
+            if preference.get('sources'):
+                routes = [source_label(source) for source in preference['sources'][:2]]
+                if len(preference['sources']) > len(routes):
+                    routes.append(f"{len(preference['sources']) - len(routes)} more in full detail")
+                text += '\nSource routes: ' + '; '.join(routes)
             units.append([{'id': 'collaboration:' + preference['id'], 'unit_id': n.get('id', preference['id']),
-                'role': 'preference', 'level': c['level'], 'text': render_claim(c, compact=True),
+                'role': 'preference', 'level': c['level'], 'text': text,
                 'as_of': preference['events'][-1]['at'], 'task_modes': modes,
                 'read_hint': {'collection': 'collaboration', 'ids': [preference['id']]},
                 'freshness': 'as-of', 'conditions': c['conditions']}])
@@ -191,6 +203,11 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
                     if mode_restriction and mode_restriction['mode'] not in unit['task_modes']:
                         continue
                     unit['text'] = f"[{unit['role']}; as-of {unit['as_of']}; {unit['freshness']}] " + unit['text']
+                    if unit.get('sources'):
+                        routes = [f"{source['path']} ({source['status']})" for source in unit['sources'][:2]]
+                        if len(unit['sources']) > len(routes):
+                            routes.append(f"{len(unit['sources']) - len(routes)} more in full detail")
+                        unit['text'] += '\nSource routes: ' + '; '.join(routes)
                     units.append([unit])
     except Exception as exc:
         from .core import MemoryError
@@ -247,7 +264,9 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
         presented = {u['id'] for u in chosen}
         deferred = next((u for group in units for u in group if u['id'] not in presented), None)
         deferred_text = '\nDeferred/read: ' + _json(deferred['read_hint']) if deferred else ''
-        route_text = '\n'.join(f"Topic {r['id']}: {r['when']}" for r in routes)
+        route_text = '\n'.join(f"Topic {r['id']}: {r['when']}" +
+                               ('; Sources: ' + '; '.join(source_label(source) for source in r['sources'][:2])
+                                if r.get('sources') else '') for r in routes)
         bootstrap = (prefix + '\n\n'.join(u['text'] for u in boot) + ('\n' + route_text if route_text else '') +
                      (deferred_text if not task and not delivery else '') + '\n</shared-memory-context>')
         text = bootstrap
@@ -257,7 +276,9 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
             owner_notice = '\nCurrent owner coverage: ' + delivery['status'] + '.'
             if delivery['gaps']:
                 owner_notice += ' Unresolved: ' + '; '.join(
-                    gap.get('id', ','.join(gap.get('ids', []))) + ' (' + gap['reason'] + ')'
+                    gap.get('id', ','.join(gap.get('ids', []))) + ' (' + gap['reason'] +
+                    (f"; read original owner: {gap['read_hint']['path']}"
+                     if gap.get('read_hint', {}).get('path') else '') + ')'
                     for gap in delivery['gaps']) + '. Read the relevant original owners before a current judgment.'
         if task or owner_notice:
             task_text = ('<shared-memory-task-context>\ncaller_context: ' + _json(caller) + '\n' +
@@ -277,7 +298,8 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
                             **({'current_status':True} if current_status else {})},
                 'items': [{k: u[k] for k in ('id', 'unit_id', 'role', 'read_hint', 'freshness')} for u in chosen],
                 **({'continuation': deepcopy(deferred['read_hint'])} if deferred else {}),
-                'routes': [{'id': r['id'], 'sources': r['sources']} for r in routes],
+                'routes': [{'id': r['id'], 'sources': [ordinary_source(source) for source in r['sources']]}
+                           for r in routes],
                 'omitted': omitted, 'truncated': bool(omitted), 'filtered_inactive': filtered,
                 'records_not_loaded': False, 'coverage': 'selected-claims-only', 'gaps': blocked,
                 'current_state_verified': False,

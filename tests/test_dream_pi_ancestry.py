@@ -427,7 +427,7 @@ def test_pi_graph_reference_rebuild_and_exact_digest_fence(tmp_path, mode):
     page = c.read({'grant_id': 'history', 'path': path.name})
     spec = c.resolve([page['selection']])[0]
     reference = spec['_catalog_page']['state_before']['pi_metadata']
-    assert set(reference) == {'cache_key', 'sha256', 'epoch', 'cutoff', 'projection_revision'}
+    assert set(reference) == {'cache_key', 'sha256', 'epoch', 'cutoff', 'projection_revision', 'raw_sha256'}
     with c._db() as db:
         if mode == 'evicted':
             db.execute('DELETE FROM structures')

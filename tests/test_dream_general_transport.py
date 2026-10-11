@@ -144,14 +144,26 @@ def test_general_methods_independent_targets_and_explicit_attempt_takeover(tmp_p
     assert denied.value.code == 'advisory_only'
 
 
-def test_cli_rejects_selected_stale_source_page_without_starting_run(tmp_path):
+def test_cli_rejects_consumed_source_mutation_without_starting_run(tmp_path):
     _, store, caller, _, _, owner, _ = environment(tmp_path)
     public = cli(store, caller, 'source-read', data={'grant_id': 'owner'})
-    owner.write_text(owner.read_text() + 'Changed after discovery.\n')
+    owner.write_text(owner.read_text().replace('coverage 7', 'coverage 9'))
     result = cli(store, caller, 'start', '--selectors-stdin',
                  data={'target_project': 'demo', 'sources': [public['selection']]}, expected=2)
     assert result['diagnostic']['code'] == 'source_changed'
     assert cli(store, caller, 'catalog')['active_runs'] == []
+
+
+def test_cli_accepts_selected_page_after_post_cutoff_append(tmp_path):
+    _, store, caller, _, _, owner, _ = environment(tmp_path)
+    public = cli(store, caller, 'source-read', data={'grant_id': 'owner'})
+    owner.write_text(owner.read_text() + 'Appended after discovery.\n')
+    started = cli(store, caller, 'start', '--selectors-stdin',
+                  data={'target_project': 'demo', 'sources': [public['selection']]})
+    assert started['status'] == 'created'
+    material = cli(store, caller, 'materials', '--run-id', started['run_id'], '--source-id', 'owner')
+    assert all('Appended after discovery.' not in event['text']
+               for source in material['sources'].values() for event in source['events'])
 
 
 def test_catalog_cli_pages_allowed_runs_after_target_revocation(tmp_path):

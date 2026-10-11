@@ -203,7 +203,7 @@ def card(r):
     sources = sorted(r['sources'], key=lambda s: {'owner': 0, 'evidence': 1, 'origin': 2, 'derivative': 3}.get(roles.get(s['uri']), 2))
     short = len(r['body'].encode('utf-8')) <= 1024
     item = {k: r[k] for k in ('id', 'project_id', 'scope', 'kind', 'effective_status', 'title')}
-    item.update(imported=r.get('imported', False), sources=[{**s, **({'role': roles[s['uri']]} if s['uri'] in roles else {})} for s in sources[:2]],
+    item.update(imported=r.get('imported', False), sources=[{**ordinary_source(s), **({'role': roles[s['uri']]} if s['uri'] in roles else {})} for s in sources[:2]],
                 source_count=len(sources), sources_omitted=max(0, len(sources) - 2),
                 read_hint={'ids': [r['id']], 'include_inactive': r['effective_status'] != 'active'},
                 match=r.get('match', {}), read_required=not short or len(sources) > 2,
@@ -212,16 +212,60 @@ def card(r):
         if key in d:
             item[key] = d[key]
     if d.get('summary'):
-        item['summary'] = d['summary']
+        item['summary'] = semantic_body(d['summary'])
         item['read_required'] = True
     elif short:
-        item['body'] = r['body']
+        item['body'] = semantic_body(r['body'])
     else:
-        item.update(preview=r['body'][:360], body_omitted=True,
+        item.update(preview=semantic_body(r['body'])[:360], body_omitted=True,
                     body_chars=len(r['body']), body_bytes=len(r['body'].encode('utf-8')))
     if r.get('recall_retired'):
         item['recall_retired'] = True
     return item
+
+
+def semantic_body(body):
+    """Hide legacy digest-only source inventories from ordinary text views."""
+    lines = []
+    for line in body.splitlines(keepends=True):
+        content = line.rstrip('\r\n')
+        if not content.startswith('Sources: '):
+            lines.append(line)
+            continue
+        refs = content[9:].split(',')
+        readable = [ref.strip() for ref in refs if not re.fullmatch(r'[0-9a-fA-F]{64}', ref.strip())]
+        if len(readable) == len(refs):
+            lines.append(line)
+        elif readable:
+            ending = line[len(content):]
+            lines.append('Sources: ' + ', '.join(readable) + ending)
+    return ''.join(lines)
+
+
+def ordinary_source(source):
+    """Keep human source notes and routes; dream bindings remain available to audit reads."""
+    result = dict(source)
+    note = result.get('note', '')
+    if note.startswith('dream-source-v1:'):
+        human_note = note.partition('\n')[2]
+        if human_note:
+            result['note'] = human_note
+        else:
+            result.pop('note')
+    return result
+
+
+def source_label(source):
+    hint = source_hint(source)
+    if hint['kind'] == 'git':
+        route = hint['repository']
+        if hint.get('revision'):
+            route += '@' + hint['revision']
+        if hint.get('path'):
+            route += ':' + hint['path']
+    else:
+        route = hint.get('path') or hint.get('uri')
+    return route + (f" ({hint['locator']})" if hint.get('locator') else '')
 
 
 def minimal_card(r):
@@ -269,7 +313,8 @@ def search(store, context, query, limit=20, include_inactive=False, *, domain=No
     if size(result) > SEARCH_RESPONSE_BYTES:
         _fail('response_budget', 'Scope and query cannot fit the response budget')
     for route in routes:
-        trial = {**result, 'routes': result['routes'] + [route], 'routes_omitted': result['routes_omitted'] - 1}
+        visible_route = {**route, 'sources': [ordinary_source(source) for source in route['sources']]}
+        trial = {**result, 'routes': result['routes'] + [visible_route], 'routes_omitted': result['routes_omitted'] - 1}
         if size(trial) <= SEARCH_RESPONSE_BYTES // 3:
             result = trial
     consumed = 0
@@ -326,8 +371,10 @@ def public_projection(tool, result, audit=False):
     if tool == 'context':
         return result if result.get('packet_version') == 1 else {key: value for key, value in result.items() if key != 'text'}
     if tool == 'read' and not audit:
-        hidden = {'proposal', 'promotion', 'review', 'curation_audit'}
-        return {**result, 'items': [{key: value for key, value in r.items() if key not in hidden}
+        hidden = {'content_digest', 'curation_revision', 'proposal', 'promotion', 'review', 'curation_audit'}
+        return {**result, 'items': [{key: (semantic_body(value) if key == 'body' else
+                                           [ordinary_source(source) for source in value] if key == 'sources' else value)
+                                    for key, value in r.items() if key not in hidden}
                                   for r in result['items']]}
     return result
 

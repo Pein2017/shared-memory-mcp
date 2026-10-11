@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 
-from .core import _digest, _fail, _json, _now
+from .core import _decode, _digest, _fail, _json, _now
 from .curation import projected_records, read_json
 from .dream_records import collaboration, render_claim
 from .dream_sources import check_snapshot
@@ -28,11 +28,23 @@ def _read_policy_revision(policy, profile, document):
     inferred = collab and any(c.get('level') == 'inferred'
                              for c in [*document['claims'], *document['dependencies'].values()])
     projects = {p for claim in document['claims'] for p in claim['projects']} if collab else set()
+    inherited_access = {}
+    if any(s['spec'].get('_inherited_selection') for s in document['sources'].values()):
+        inherited_access['reader'] = profile.get('read_access', 'granted')
+    for dependency in document['dependencies'].values():
+        for source in dependency.get('sources', []):
+            note = source.get('note', '')
+            if note.startswith('dream-source-v1:'):
+                binding = _decode(note[len('dream-source-v1:'):])
+                if binding.get('source_spec', {}).get('_inherited_selection'):
+                    owner = binding['profile']
+                    inherited_access[owner] = policy['profiles'].get(owner, {}).get('read_access', 'granted')
     return _digest({'version': policy['version'], 'subject': policy['subject'],
                     'target_allowed': document['target'] in profile['target_projects'],
                     'scenarios': sorted(scenarios.intersection(profile['scenarios'])),
                     'grants': {g['id']: g for g in profile['source_grants'] if g['id'] in grant_ids},
                     'collaboration_projects': sorted(projects.intersection(policy['collaboration_projects'])),
+                    **({'inherited_access': inherited_access} if inherited_access else {}),
                     'allow_inferred': profile['allow_inferred'] if inferred else None})
 
 
