@@ -9,6 +9,7 @@
 - [x] 2.2 Update the bundled skill and existing operations reference for evidence-transition capture, actionable candidate gaps and bounded consolidation dispositions/readback; validate with skill-creator's `quick_validate.py` and inspect unchanged approval, conditional coexistence, duplicate supersession and unsupported retirement cases against current APIs.
 - [x] 2.3 Run focused existing regressions for nonempty recall, exact candidate approval, scoped successors, candidate/view isolation and qualified compact delivery using candidate imports and disposable stores; retain failures and actual exit status rather than treating publication counts as acceptance.
 - [x] 2.4 Validate this OpenSpec change with `openspec validate improve-capture-and-dreaming-closure --strict`, check owned diffs/skill reference links, and verify canonical HEAD/clean status and live bindings remain unchanged; record candidate validation and its limits in `design.md`.
+- [x] 2.5 Implement the user's reading follow-up in the shared reminder, skill and operations reference: task-driven batches without cumulative count quotas, exact continuation/reassembly, semantic stopping and explicit gaps, retaining per-batch/backend protections. Validate skill/OpenSpec and retained search/detail/source continuation and consumer-budget behavior; do not claim model compliance from deterministic checks.
 
 ## 3. Adoption and remaining consumer assessment
 

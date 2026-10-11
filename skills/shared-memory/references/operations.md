@@ -101,6 +101,24 @@ Use an exact real 64-hex revision and unit index. The source file's age does not
 
 When asked what is *currently* true or to make a consequential recommendation, call `context(query="...", task_mode="research"|"general", current_status=true)` with actual caller context. Inspect `owner_checks.status`, `gaps`, exact selected owner excerpts and source revision; open the source directly if needed. Routine background recall does not read every owner. Example CoordExp routes/source selectors are in `examples/coordexp-research-routing.json` and `examples/coordexp-research-grants.json`; they require an explicit operator-configured source policy, not automatic installation.
 
+## Progressive task-driven reading
+
+Use as many relevant batches as the authorized task needs. A response budget or `limit` controls one delivery, not the total records, sessions, sources, pages or rounds the Agent may read. Bounded scope means the task question, source grants and frozen selections; do not invent a cumulative count quota or interpret the first batch as the entire evidence base. Existing backend protections can still reject a read: expose that gap, without calling it an empty result or completed review.
+
+Start with task-bound context to locate useful claims and owners, then use discriminating search and full detail for the open question. Expand along original source routes, corrections, conditions and conflicting evidence that could change the answer. A preview or compact account is insufficient when omitted qualifications matter. First-page ranking does not establish that later evidence is irrelevant.
+
+| Delivery | Needed continuation |
+| --- | --- |
+| `context` selected claims and `continuation` | Follow the returned read hint or original owner route. The hint is not a cursor over every omission; use targeted search/read to discover additional needed records. Repeating the same context request does not paginate. |
+| `search` cards | Pass returned `next_offset` as `offset` and `corpus_revision` as `expected_revision`, retaining the same query, collection, mode and visibility. Inspect full records when previews omit needed evidence. |
+| `read` / `overview_read` detail | Pass an item's `detail_page` as `page`, then each returned `next_page`. Reassemble the complete `detail_page.text` JSON before interpreting the claim. Read needed `read.omitted_ids` separately in smaller batches; retain the original request's selectors/projection flags and the returned revision. |
+| `dream_catalog`, `source_list`, `memory_audit` | Pass returned `next_cursor` as `cursor` under the same selection and any cursor-bound budgets. Reassemble `memory_audit` JSON slices by their exact offsets/revision; retained visibility is not semantic review. |
+| `source_read` public source pages | Continue the same original grant/path/branch selection with returned `next_cursor`. Preserve each returned frozen `selection` and version for review provenance; a page handle is not the next cursor. Use supported event/body continuation when needed details remain partial. |
+
+Keep track of what is still needed: missing conditions, later user corrections, conflicting observations and original-source checks. This is task-local reasoning, not a new persistent queue. If a revision changes, restart that affected selection and reconcile the consumed evidence; do not splice different revisions or invent offsets, parser state or authority. Permission denial, unresolved ancestry or exhausted supported continuation remains an explicit dependent gap.
+
+Stop when the requested judgment is supported with its decisive qualifiers, or explain what concrete blocker leaves it unresolved. For an explicitly requested complete review, traverse the authorized selection and account for exclusions/gaps; an ordinary task does not need to drain unrelated history merely because a cursor exists. Reading or delivering a page never counts as reviewing its meaning. Report scoped coverage rather than declaring whole-history success.
+
 ## Manual bounded Dreaming in the same MCP entry
 
 Use `dream_catalog` and `source_read` to select granted sources; `run_start(review_objective={"id":"...", "question":"..."})` starts a bounded review only when authorized. Use `run_observe`, `run_materials`, `run_changes`, `coverage_mark`, `draft_submit`, `draft_read`, `draft_publish` and `run_close` in the current lane. Do not equate page delivery with semantic review, or no source changes with objective completion. Unresolved `issue_search` / `issue_resolve` proposals are advisory and never grant permission to run experiments. History episodes use `collection="history"` with provenance ranges and stay outside default context.
@@ -119,7 +137,7 @@ Choose a disposition from evidence rather than aiming for a number of new record
 | Merely obsolete relevance, with no retirement action | Report the retirement need. Do not substitute withdrawal or call ordinary `curate` to bypass the DreamRun action policy. |
 | Missing evidence, permission, ancestry or a user-owned decision | Defer the affected claim with its blocker and revisit condition in existing candidate content or run disposition; do not publish it through a view. |
 
-Use supported exact event/body/page continuation before classifying selected material as oversized or unreadable. Keep source revisions and branch selection fixed; delivered pages are not semantic review. If access is forbidden, sensitive-content filtering rejects material, ancestry is unresolved or supported continuation is exhausted, retain that dependent gap and finish independently supported work. A moved source path is not proof that a prohibition can be bypassed.
+Apply the [progressive reading guidance](#progressive-task-driven-reading) to the selected review sources: use supported exact event/body/page continuation before classifying needed material as oversized or unreadable, with no cumulative count quota. Keep source revisions and branch selection fixed; delivered pages are not semantic review. If access is forbidden, sensitive-content filtering rejects material, ancestry is unresolved or supported continuation is exhausted, retain that dependent gap and finish independently supported work. A moved source path is not proof that a prohibition can be bypassed.
 
 When the reviewed account changes, refresh affected compact views/navigation as needed. Keep as-of status, original-source routes, necessary conditions and counterevidence attached; detailed records carry the longer account. A compact view is not a place to promote unresolved candidate claims. Fit is determined by the actual serialized consumer budget, not a universal character count; retain whole qualified units or explicit read routes.
 

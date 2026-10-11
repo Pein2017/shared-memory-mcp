@@ -27,6 +27,7 @@ SEARCH_BODY_BYTES = 1024
 WORKFLOW_REMINDER = (
     'Shared-memory reminder: Use the shared-memory skill for nontrivial registered-project coding/research. '
     'Startup supplies dated background; select research/general and retrieve relevant task evidence. '
+    'Read relevant evidence in successive batches; response limits are not cumulative reading quotas. '
     'Capture durable source-linked findings; reviewed publication is not proof. '
     'Handoff is independent transport, not an automatic memory capture trigger. '
     'Use actual caller identity and return to original sources before consequential use. '
