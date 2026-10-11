@@ -105,6 +105,26 @@ When asked what is *currently* true or to make a consequential recommendation, c
 
 Use `dream_catalog` and `source_read` to select granted sources; `run_start(review_objective={"id":"...", "question":"..."})` starts a bounded review only when authorized. Use `run_observe`, `run_materials`, `run_changes`, `coverage_mark`, `draft_submit`, `draft_read`, `draft_publish` and `run_close` in the current lane. Do not equate page delivery with semantic review, or no source changes with objective completion. Unresolved `issue_search` / `issue_resolve` proposals are advisory and never grant permission to run experiments. History episodes use `collection="history"` with provenance ranges and stay outside default context.
 
+Bind the review question, selected source versions/cutoff and relevant scope before synthesis. Inspect existing work through `run_observe`/`run_changes`, and relevant records through bounded `memory_audit`, including candidates and inactive items where needed. Search related advisory issues; review their actual gaps even when source bytes are unchanged. Compare granted original owners against memory for missing accepted findings, stale current claims, duplicate accounts, apparent conflicts and scope mistakes. Do not turn a bounded selection into a claim of whole-history coverage.
+
+Choose a disposition from evidence rather than aiming for a number of new records:
+
+| Reviewed situation | Disposition |
+| --- | --- |
+| Unchanged candidate with sufficient original-source evidence | `record_approve` using its exact audited content digest and sources; preserve original payload, provenance and qualifier. |
+| Review changes a candidate's proposition | Create separately reviewed knowledge; justify withdrawal of the old candidate or leave it pending with the precise gap. Dreaming supersession requires active predecessors, so do not relabel this as unchanged approval or supersede a candidate. |
+| Compatible active duplicates with the same qualifier | `record_supersede` with every predecessor and a source-linked successor retaining decision-changing conditions and limitations. |
+| Different populations, checkpoints, versions or conditions | Retain separate conditional observations; establish actual replacement before superseding. Unresolved conflict stays explicit. |
+| Established rejection or no-use | Granted `record_withdraw` with its source-checked reason; retain logical history. |
+| Merely obsolete relevance, with no retirement action | Report the retirement need. Do not substitute withdrawal or call ordinary `curate` to bypass the DreamRun action policy. |
+| Missing evidence, permission, ancestry or a user-owned decision | Defer the affected claim with its blocker and revisit condition in existing candidate content or run disposition; do not publish it through a view. |
+
+Use supported exact event/body/page continuation before classifying selected material as oversized or unreadable. Keep source revisions and branch selection fixed; delivered pages are not semantic review. If access is forbidden, sensitive-content filtering rejects material, ancestry is unresolved or supported continuation is exhausted, retain that dependent gap and finish independently supported work. A moved source path is not proof that a prohibition can be bypassed.
+
+When the reviewed account changes, refresh affected compact views/navigation as needed. Keep as-of status, original-source routes, necessary conditions and counterevidence attached; detailed records carry the longer account. A compact view is not a place to promote unresolved candidate claims. Fit is determined by the actual serialized consumer budget, not a universal character count; retain whole qualified units or explicit read routes.
+
+After publication, verify applicable ordinary target `context` plus discriminating `search/read` with real caller identity and default active eligibility, rather than relying on audit visibility. Never borrow a target session identity; report a consumer gap when that boundary cannot be exercised. Resolve an advisory issue only after checking its requested correction or conclusion at the authoritative owner, with evidence; publishing a memory alone does not resolve it. Close the bounded Run after reconciling effects and dispositions, reporting what was added/approved/replaced/deferred, remaining gaps, coverage and consumer usefulness separately from technical success. Stop there; no speculative repeated repair or automatic next batch.
+
 ## Session handoff
 
 Write the requested local handoff document with current state, owned files, next actions and any running-job recovery information. The receiving session reads it directly. Store a separate durable finding only if it adds reusable source-linked knowledge. A release/progress/assignment snapshot by itself is not such a finding and cannot be captured as `handoff`.

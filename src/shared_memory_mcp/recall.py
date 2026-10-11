@@ -247,7 +247,7 @@ def search(store, context, query, limit=20, include_inactive=False, *, domain=No
         routing = load_routing(store, scope['project_id'])
         routes, expansion = route_matches(routing, query)
         ranked = rank(records, query, expansion, domain)
-        if task_mode:
+        if task_mode and normalized(query):
             for r in ranked:
                 if task_mode in r.get('details', {}).get('task_modes', []):
                     r['match']['score'] *= 1.15

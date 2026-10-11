@@ -110,6 +110,64 @@ def test_pagination_is_bounded_and_revision_fenced(env):
         store.search(ctx, 'pytest', offset=first['next_offset'], expected_revision=first['corpus_revision'])
 
 
+@pytest.mark.parametrize('query', ['', ' \n\t\u3000'])
+@pytest.mark.parametrize('mode', ['research', 'general'])
+def test_empty_mode_search_browses_without_lexical_matches(env, query, mode):
+    store, ctx, _ = env
+    a = store.capture(ctx, record(title='A research'), 'a', review=REVIEW,
+                      details={'task_modes': ['research']})
+    b = store.capture(ctx, record(title='B general'), 'b', review=REVIEW,
+                      details={'task_modes': ['general']})
+    pending = store.capture(ctx, record(title='0 pending'), 'pending',
+                            details={'task_modes': [mode]})
+    plain = store.search(ctx, query)
+    first = store.search(ctx, query, task_mode=mode, limit=1)
+    second = store.search(ctx, query, task_mode=mode, limit=1,
+                          offset=first['next_offset'], expected_revision=first['corpus_revision'])
+    items = first['items'] + second['items']
+    assert [r['id'] for r in items] == [a['id'], b['id']] == [r['id'] for r in plain['items']]
+    assert all(r['match'] == {} for r in items)
+    assert first['total_matches'] == 2 and second['next_offset'] is None
+    assert pending['id'] not in {r['id'] for r in items}
+    audited = store.search(ctx, query, task_mode=mode, include_inactive=True)
+    assert audited['items'][0]['id'] == pending['id']
+    assert audited['items'][0]['effective_status'] == 'candidate'
+    restricted = store.search(ctx, query, task_mode=mode,
+        mode_restriction={'mode': mode, 'basis': 'explicit-user-restriction'})
+    assert [r['id'] for r in restricted['items']] == [a['id'] if mode == 'research' else b['id']]
+    store.capture(ctx, record(title='C new'), 'new', review=REVIEW)
+    with pytest.raises(MemoryError, match='changed'):
+        store.search(ctx, query, task_mode=mode, offset=first['next_offset'],
+                     expected_revision=first['corpus_revision'])
+
+
+def test_empty_mode_search_through_public_mcp(env):
+    import asyncio
+    import os
+    import sys
+    pytest.importorskip('mcp')
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    store, ctx, _ = env
+    original = accepted(store, ctx, 'public-browse', title='Public browse')
+
+    async def verify():
+        params = StdioServerParameters(command=sys.executable,
+            args=['-m', 'shared_memory_mcp.cli', '--root', str(store.root), 'serve'],
+            env={**os.environ, 'PYTHONPATH': str(Path(__file__).parents[1] / 'src')})
+        async with stdio_client(params) as (reader, writer):
+            async with ClientSession(reader, writer) as session:
+                await session.initialize()
+                for query in ('', ' \n\t\u3000'):
+                    for mode in ('research', 'general'):
+                        result = await session.call_tool('search', {'context': ctx, 'query': query, 'task_mode': mode})
+                        assert not result.isError, result
+                        payload = result.structuredContent or json.loads(result.content[0].text)
+                        assert payload['status'] == 'ok' and payload['items'][0]['id'] == original['id']
+                        assert payload['items'][0]['match'] == {}
+    asyncio.run(verify())
+
+
 def test_oversized_card_still_has_read_path_and_progress(env):
     store, ctx, _ = env
     large = accepted(store, ctx, 'oversized', title='pytest',
