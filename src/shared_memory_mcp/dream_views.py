@@ -106,7 +106,9 @@ def prepare_view(engine, run, operation, source_checks):
             _fail('stale_source', 'View source snapshots are not current at the prepublication check')
         events.update(claim_events)
         dependencies.update(claim_deps)
+        assurance = sorted({e['assurance'] for e in claim_events.values() if e.get('assurance')})
         unit_bindings.append({'sources': sorted({e['source_id'] for e in claim_events.values()}),
+                              **({'selection_assurance': assurance} if assurance else {}),
                               'dependencies': sorted(claim_deps), 'claim_digest': _digest(claim),
                               'evidence_keys': sorted({key for e in claim_events.values() for key in [e['key'], *e.get('lineage', [])]})})
     specs = {s['id']: s for s in profile['sources']}

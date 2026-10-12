@@ -1316,7 +1316,8 @@ class Dreaming:
                                                    'event_key': e['key'], 'lineage': e.get('lineage', []),
                                                    'source_grant': _digest(compact_source_spec(specs[e['source_id']])),
                                                    'source_spec': compact_source_spec(specs[e['source_id']]),
-                                                   'claim_level': operation.get('claim', {}).get('level')})}
+                                                   'claim_level': operation.get('claim', {}).get('level'),
+                                                   **({'selection_assurance': e['assurance']} if e.get('assurance') else {})})}
                 for e in events.values()]
         uris.extend(source for dependency in dependencies.values() for source in dependency['sources'])
         uris = list({_digest(s): s for s in uris}.values())

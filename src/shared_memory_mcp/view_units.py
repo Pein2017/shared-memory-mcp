@@ -118,6 +118,7 @@ def collect_units(engine, view, *, scenario, historical=None, target_project=Non
                 'role': narrative.get('role', 'background'), 'index': index,
                 'level': claim['level'], 'text': render_claim(claim, compact=compact),
                 'as_of': binding.get('as_of', document['as_of']), 'freshness': freshness,
+                **({'selection_assurance': binding['selection_assurance']} if binding.get('selection_assurance') else {}),
                 'conditions': claim['conditions'], 'task_modes': claim.get('task_modes', []),
                 'read_hint': {'view': view, 'historical': revision, 'unit_index': index, 'scenario': scenario},
                 'sources': [{'path': source['path'], 'status': source_states[sid],

@@ -237,8 +237,9 @@ def materialized_page(source, *, db=None):
                     if source.get('leaf_id') and source['format'] != 'pi':
                         event['branch'] = source['leaf_id']
                     events.append(event)
-            if source['format'] == 'pi':
-                events, _ = _branches(source, events, gaps, state, 0)
+            if source['format'] == 'pi' or source['format'] == 'claude' and not source.get('leaf_id'):
+                # Re-derive branch labels (Pi ancestry, Claude default leaf) over the same frozen window.
+                events, _ = _branches(source, events, gaps if source['format'] == 'pi' else [], state, 0)
             events = [e for e in events if e['byte_start'] in admitted]
         range_verification_bytes = getattr(stream, '_dream_verification_bytes', 0)
     # Fence source mutation around the reconstruction, including replacement.

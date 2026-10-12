@@ -20,6 +20,8 @@
 
 - [x] 2.9 Retire the historical fixed-Run CLI delegation (`dream gateway --profile`) and dated-profile gateway paths: invoking them reports `retired` with a pointer to the unified operations and creates no run; remove their registration from the installer cutover plan only where it would re-add them; verify RED/GREEN that the old CLI path returns the retired diagnostic and that existing receipts under the live store layout are untouched by tests (tmp stores only).
 
+- [x] 2.10 Claude default leaf: when a Claude transcript is read without `leaf_id`, select the branch ending at the newest public message by timestamp (ties: last in file) as the default leaf, report `branch: default-leaf` on its events and mark the selection `assurance: default-leaf` (below an explicit leaf) so it can support publication; an explicit `leaf_id` still overrides; files whose newest message has unresolvable ancestry keep `active_branch_unverified`. RED/GREEN: a two-branch fixture publishes from the newest branch by default, the other branch stays navigation-only, and an explicit older leaf wins over the default; the production-shape test's accepted gaps drop to the compaction gap only.
+
 ## 3. WP3 Lifecycle and governance (owns core.py, recall.py, curation.py, maintenance.py, context_packet.py, owner_checks.py; may run concurrently with WP2)
 
 - [x] 3.1 Caller identity fields `role/model/parent_session_id/task_id` retained as origin provenance without widening scope; task-scope default expiry of fourteen days and task records included in task context for same worktree+task; verify RED/GREEN that a declared role grants no extra permission, two callers with one task share task records and a third task does not.
@@ -37,6 +39,8 @@
 - [x] 4.4 Installer plans and, only with `--apply --claude-dir`, installs the owned SubagentStart hook group; verify dry-run JSON shows the group and repeated apply creates no duplicates (fixture config, no live install).
 - [x] 4.5 Pi: the installed Pi extension spawns the same detached `extract` on root session start when enabled, and emits a bounded worker caller identity for Pi subagent sessions when the host exposes a subagent start event (discover the pi-web subagent extension's hook surface first; if none exists, record the gap and keep root spawn only); verify the extension regression shows root startup spawning once and no spawn for a subagent session.
 - [x] 4.6 Operator listing `shared-memory extract --status` per session (eligible/leased/extracted/failed/no-output) and explicit re-extraction; verify output on a fixture store with one of each state.
+
+- [x] 4.7 Prevent extraction self-triggering: the hook spawns extraction only for `source=startup` with a resolved registered scope; the model command runs with an environment marker that makes any hook it triggers skip spawning; `extract --startup` refuses to run under that marker; one invocation claims at most `max_sessions_per_startup` and exits. RED/GREEN: hook on an unmapped cwd spawns nothing; hook under the marker spawns nothing; a fake-model run never produces a second `extract --startup`; two sequential invocations claim different sessions.
 
 ## 5. Integration, qualification and external follow-ups
 

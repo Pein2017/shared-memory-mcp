@@ -257,11 +257,12 @@ def test_claude_unverified_or_ambiguous_chain_is_never_admitted(tmp_path, values
     assert result['coverage']['gaps']
 
 
-def test_claude_without_selected_leaf_preserves_public_projection_with_gap(tmp_path):
-    spec = source(tmp_path, 'claude', [claude_message('A', None)], native_version='fixture-v1')
+def test_claude_default_leaf_with_unresolved_ancestry_keeps_the_gap(tmp_path):
+    spec = source(tmp_path, 'claude', [claude_message('A', None), claude_message('C', 'missing-parent')],
+                  native_version='fixture-v1')
     result = read_source(spec)
-    assert result['events'][0]['event_id'] == 'A'
-    assert result['events'][0]['branch'] == 'unspecified'
+    assert [e['event_id'] for e in result['events']] == ['A', 'C']
+    assert {e['branch'] for e in result['events']} == {'unspecified'}
     assert not result['coverage']['complete']
     assert any(g['reason'] == 'active_branch_unverified' for g in result['coverage']['gaps'])
 

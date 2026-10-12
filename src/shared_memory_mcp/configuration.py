@@ -74,7 +74,8 @@ class ViewReader:
 
 EXTRACTION = 'extraction.json'
 EXTRACTION_DEFAULTS = {'version': 1, 'enabled': False, 'models': {}, 'idle_hours': 1, 'max_sessions_per_startup': 2,
-                       'max_age_days': 10, 'window_bytes': 204800, 'history_roots': []}
+                       'max_age_days': 10, 'window_bytes': 204800, 'history_roots': [],
+                       'min_spawn_interval_minutes': 30}
 
 
 def load_extraction(store):
@@ -93,7 +94,8 @@ def load_extraction(store):
         if config['version'] != 1 or type(config['enabled']) is not bool:
             _fail('invalid_extraction', 'extraction.version must be 1 and enabled a boolean')
         for name, low, high in (('idle_hours', 0, 24 * 30), ('max_sessions_per_startup', 1, 16),
-                                ('max_age_days', 1, 365), ('window_bytes', 4096, 8 * 1024 * 1024)):
+                                ('max_age_days', 1, 365), ('window_bytes', 4096, 8 * 1024 * 1024),
+                                ('min_spawn_interval_minutes', 0, 7 * 24 * 60)):
             if type(config[name]) not in (int, float) or isinstance(config[name], bool) or not low <= config[name] <= high:
                 _fail('invalid_extraction', f'extraction.{name} must be a number in [{low}, {high}]')
         models = config['models']

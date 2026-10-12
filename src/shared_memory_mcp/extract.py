@@ -31,6 +31,12 @@ BACKOFF_MAX = 86400
 JOURNAL_LIMIT = 64
 HEADER_LINES = 64
 MAX_CANDIDATES = 16
+# Set in every model command's environment; any hook or `extract --startup` that sees it never spawns.
+MARKER = 'SHARED_MEMORY_EXTRACTION'
+WORKER_CATEGORIES = {'mistake', 'correction', 'capability-gap'}
+# Worker output that only restates the assignment or its completion is not a lesson.
+TASK_ONLY = re.compile(r'^\W*(?:the\s+)?(?:worker|subagent|agent)\s+(?:was\s+|is\s+)?(?:assigned|asked|tasked|given|instructed|requested)\b'
+                       r'|^\W*(?:successfully\s+)?(?:completed|finished|performed|conducted|delivered)\b', re.I)
 DONE = ('extracted', 'no-output', 'skipped')
 CAPTURE_KINDS = KINDS - {'handoff'}
 # Recognizable provider/auth/quota text; only consulted when no valid result was produced.
@@ -47,20 +53,32 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS extraction_jobs (
 COLUMNS = ('transcript', 'size', 'state', 'lease_owner', 'lease_until', 'attempts', 'next_attempt', 'generation',
            'windows', 'journal', 'updated_at')
 
-CONTRACT = ('Return only one JSON object, no prose or code fences:\n'
-            '{"candidates":[{"kind":"decision|bug/root-cause|invariant|observation|result|hypothesis|evidence|experiment",'
-            '"title":"<=100 chars","body":"self-contained statement","conditions":"when and where it holds",'
-            '"source_events":["L12"]}],"no_output":false}\n'
-            'Use {"candidates":[],"no_output":true} when nothing qualifies. At most 5 candidates. '
-            'source_events must be event labels from the window below.\n')
+COMMON = ('Rules for every candidate: a generalization from one or a few sessions must use kind "hypothesis"; '
+          'plain configuration or settings changes are excluded; write title, body, conditions and cause in the '
+          'language of the transcript.\n')
+CONTRACT = {
+    'root': ('Return only one JSON object, no prose or code fences:\n'
+             '{"candidates":[{"kind":"decision|bug/root-cause|invariant|observation|result|hypothesis|evidence|experiment",'
+             '"title":"<=100 chars","body":"self-contained statement","conditions":"when and where it holds",'
+             '"source_events":["L12"]}],"no_output":false}\n'
+             'Use {"candidates":[],"no_output":true} when nothing qualifies. At most 5 candidates. '
+             'source_events must be event labels from the window below.\n'),
+    'worker': ('Return only one JSON object, no prose or code fences:\n'
+               '{"candidates":[{"kind":"bug/root-cause|observation|hypothesis","category":"mistake|correction|capability-gap",'
+               '"title":"<=100 chars","body":"what went wrong","cause":"its likely cause",'
+               '"conditions":"when it happens","source_events":["L12"]}],"no_output":false}\n'
+               'Use {"candidates":[],"no_output":true} when nothing qualifies, including when the worker simply did '
+               'its task. At most 3 candidates. source_events must be event labels from the window below.\n'),
+}
 PROMPTS = {
     'root': ('You extract durable, reusable knowledge from one window of a past {harness} lead-agent session '
              'transcript. Keep only decisions with their reasons, corrections the user made to the agent, verified '
              'root causes of failures, and durable lessons or invariants, each with the conditions under which it holds. '
              'Skip routine progress, tool output, unexecuted plans and speculation. Prefer no candidate over a weak one.\n'),
     'worker': ('You review one window of a past {harness} delegated worker (subagent) session transcript. Do not '
-               'extract project knowledge. Report the task the worker was given, mistakes it made, and their likely '
-               'cause, each with the conditions under which the mistake happens. Prefer no candidate over a weak one.\n'),
+               'extract project knowledge and do not describe the assignment or report that work was completed. '
+               'Report only an actual mistake the worker made, a correction it received, or a capability gap it hit, '
+               'each with its likely cause and the condition under which it happens. Prefer no candidate over a weak one.\n'),
 }
 
 
@@ -368,7 +386,8 @@ def _validate(result, labels):
         return None
     for item in result['candidates']:
         if (not isinstance(item, dict) or not {'kind', 'title', 'body'} <= set(item) or
-                not set(item) <= {'kind', 'title', 'body', 'conditions', 'source_events'} or
+                not set(item) <= {'kind', 'title', 'body', 'conditions', 'source_events', 'category', 'cause'} or
+                not isinstance(item.get('category', ''), str) or not isinstance(item.get('cause', ''), str) or
                 item['kind'] not in CAPTURE_KINDS or
                 not isinstance(item['title'], str) or not 0 < len(item['title'].strip()) <= 200 or
                 not isinstance(item['body'], str) or not 0 < len(item['body'].strip()) <= 4000 or
@@ -379,6 +398,17 @@ def _validate(result, labels):
     return result
 
 
+def _worker_filter(result):
+    """Keep worker candidates only for a mistake/correction/capability gap with a cause and a condition."""
+    kept = []
+    for item in result['candidates']:
+        text = item['title'].strip() + '\n' + item['body'].strip()
+        if (item.get('category') in WORKER_CATEGORIES and item.get('cause', '').strip() and
+                item.get('conditions', '').strip() and not TASK_ONLY.search(item['title']) and not TASK_ONLY.search(item['body'])):
+            kept.append({**item, 'body': item['body'].strip() + '\nLikely cause: ' + item['cause'].strip()})
+    return {'candidates': kept, 'no_output': not kept}, len(result['candidates']) - len(kept)
+
+
 def _model(argv, prompt, labels):
     """One configured model; one retry on invalid JSON; provider failures are final for this run."""
     entry = {'model_command': argv[0], 'attempts': 0, 'wall_seconds': 0.0}
@@ -386,7 +416,8 @@ def _model(argv, prompt, labels):
         entry['attempts'] += 1
         started = time.monotonic()
         try:
-            process = subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=MODEL_TIMEOUT)
+            process = subprocess.run(argv, input=prompt, capture_output=True, text=True, timeout=MODEL_TIMEOUT,
+                                     env={**os.environ, MARKER: '1'})
         except (OSError, subprocess.TimeoutExpired) as exc:
             entry['wall_seconds'] += round(time.monotonic() - started, 3)
             return None, {**entry, 'outcome': 'provider-error', 'error': type(exc).__name__}
@@ -441,10 +472,14 @@ def _extract_one(store, config, owner, path, root, generation):
             ids += stored['ids']
             continue
         if stored is None:
-            prompt = (PROMPTS[base['session_class']].format(harness=fmt) + CONTRACT +
+            prompt = (PROMPTS[base['session_class']].format(harness=fmt) + COMMON + CONTRACT[base['session_class']] +
                       f'\nWindow {index + 1} of {len(windows)} ({window_range}):\n' + window['text'])
             result, entry = _model(model['argv'], prompt, window['labels'])
             entry = {**base, **entry, 'window': index, 'events': window_range, 'gaps': gaps}
+            if result is not None and worker:
+                result, entry['filtered'] = _worker_filter(result)
+                if entry['outcome'] == 'candidates' and not result['candidates']:
+                    entry['outcome'] = 'no-output'
             if result is None:
                 _update(store, transcript, owner, lambda r: _finish(r, 'failed', entry, failure=True))
                 return {'transcript': transcript, 'state': 'failed', 'outcome': entry['outcome'], 'candidates': ids}
@@ -461,7 +496,8 @@ def _extract_one(store, config, owner, path, root, generation):
             details = {'assurance': 'model-extracted', 'extensions': {'extraction': {
                 'transcript': transcript, 'window': index, 'events': window_range, 'harness': fmt,
                 'session_class': base['session_class'], 'extraction_model': model['name'],
-                'source_events': item.get('source_events', []), **lineage}}}
+                'source_events': item.get('source_events', []), **lineage,
+                **({'category': item['category']} if item.get('category') else {})}}}
             if item.get('conditions', '').strip():
                 details['conditions'] = item['conditions'].strip()
             record = {'kind': item['kind'], 'title': item['title'].strip(), 'body': item['body'].strip(), 'scope': 'project',
@@ -486,6 +522,9 @@ def _extract_one(store, config, owner, path, root, generation):
 
 
 def run(store, *, limit=None, transcript=None, force=False, startup=False):
+    if startup and os.environ.get(MARKER):
+        # A startup inside an extraction model process must never extract again (recursive chain guard).
+        return {'status': 'suppressed_recursive_spawn', 'pid': os.getpid(), 'at': _now_iso()}
     config = load_extraction(store)
     if config['diagnostic']:
         return {'status': 'disabled', 'diagnostic': config['diagnostic']}
@@ -545,13 +584,38 @@ def status(store):
             'model': (config['model'] or {}).get('name'), 'counts': counts, 'sessions': listing}
 
 
-def spawn(store, command=None):
-    """Start `extract --startup` detached; never inherit the hook's pipes or wait for it."""
+def _log(log, record):
+    with open(log, 'a', encoding='utf-8') as stream:
+        stream.write(json.dumps({**record, 'pid': os.getpid(), 'at': _now_iso()}) + '\n')
+
+
+def spawn(store, command=None, trigger=None):
+    """Start `extract --startup` detached; never inherit the hook's pipes or wait for it.
+
+    A hook passes its `trigger`; non-persisted (ephemeral) startups never spawn. A store-wide
+    cooldown (`min_spawn_interval_minutes`, user-owned) is enforced in the writer-gate DB.
+    """
     config = load_extraction(store)
     if config['diagnostic'] or not config['enabled'] or config['model'] is None:
         return {'spawned': False, 'diagnostic': config['diagnostic']}
     log = store.root / '.state' / 'extraction.log'
     log.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.environ.get(MARKER):
+        _log(log, {'status': 'suppressed_recursive_spawn'})
+        return {'spawned': False, 'diagnostic': None, 'suppressed': 'recursive_spawn'}
+    if trigger is not None and not trigger.get('transcript_path'):
+        _log(log, {'status': 'skipped_ephemeral_trigger', 'trigger': trigger})
+        return {'spawned': False, 'diagnostic': None, 'suppressed': 'ephemeral_trigger'}
+    now, interval = time.time(), config['min_spawn_interval_minutes'] * 60
+    with _jobs(store) as db:
+        db.execute('CREATE TABLE IF NOT EXISTS extraction_spawns (id INTEGER PRIMARY KEY CHECK (id = 1), last_spawn REAL NOT NULL)')
+        last = (db.execute('SELECT last_spawn FROM extraction_spawns WHERE id = 1').fetchone() or [None])[0]
+        cooling = interval and last is not None and now - last < interval
+        if not cooling:
+            db.execute('INSERT OR REPLACE INTO extraction_spawns (id, last_spawn) VALUES (1, ?)', (now,))
+    if cooling:
+        _log(log, {'status': 'spawn_cooldown', 'trigger': trigger or {}, 'next_after_seconds': round(interval - (now - last))})
+        return {'spawned': False, 'diagnostic': None, 'suppressed': 'spawn_cooldown'}
     argv = command or [sys.executable, '-m', 'shared_memory_mcp.cli', '--root', str(store.root), 'extract', '--startup']
     fd = os.open(log, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
@@ -559,4 +623,5 @@ def spawn(store, command=None):
                                    start_new_session=True, close_fds=True)
     finally:
         os.close(fd)
+    _log(log, {'status': 'spawned', 'child_pid': process.pid, 'trigger': trigger or {}})  # which startup started which extractor
     return {'spawned': True, 'pid': process.pid, 'log': str(log)}

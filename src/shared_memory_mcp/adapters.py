@@ -39,8 +39,11 @@ def _caller(harness: str, event: Any) -> dict[str, str]:
 
 
 def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
-                max_chars: int = 6000, max_bytes: int = 8000) -> dict[str, Any]:
-    """Translate only the actual native cwd/session; never use process cwd."""
+                max_chars: int = 6000, max_bytes: int = 8000, state: dict | None = None) -> dict[str, Any]:
+    """Translate only the actual native cwd/session; never use process cwd.
+
+    `state["resolved"]` is set only when core returned a valid packet for a registered project.
+    """
     caller = _caller(harness, event)
     result = store.context(caller, limit=limit, max_chars=max_chars, max_bytes=max_bytes)
     if not isinstance(result, dict) or result.get("status") != "ok":
@@ -62,6 +65,8 @@ def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
     text = result.get("text") if isinstance(result, dict) else None
     if not isinstance(text, str) or len(text) > max_chars:
         raise AdapterInputError("Core returned invalid or oversized context")
+    if state is not None:
+        state["resolved"] = True
     if not text:
         return {}
     output = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": text}}
@@ -108,7 +113,7 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
-    startup = False
+    startup, state = False, {}
     try:
         raw = stdin.read(1_048_577)
         if len(raw) > 1_048_576:
@@ -120,8 +125,9 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
         if harness == "claude" and isinstance(event, dict) and event.get("hook_event_name") == "SubagentStart":
             output = handle_subagent(store, event)
         else:
-            startup = isinstance(event, dict) and event.get("hook_event_name") == "SessionStart" and event.get("source") == "startup"
-            output = handle_hook(store, harness, event)
+            output = handle_hook(store, harness, event, state=state)
+            # Only a resolved registered-project startup may start extraction (never onboarding/unmapped output).
+            startup = state.get("resolved", False) and event.get("source") == "startup"
     except Exception as exc:
         # Do not echo raw native input, transcript paths, credentials, or records.
         code = getattr(exc, "code", "adapter_error")
@@ -135,7 +141,7 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
         try:
             if spawn is None:
                 from .extract import spawn
-            started = spawn(store)
+            started = spawn(store, trigger={k: event.get(k) for k in ("cwd", "session_id", "source", "transcript_path")} | {"harness": harness})
             if started.get("diagnostic"):
                 print(json.dumps({"shared_memory_extraction": "disabled", "diagnostic": started["diagnostic"]}), file=stderr)
         except Exception as exc:

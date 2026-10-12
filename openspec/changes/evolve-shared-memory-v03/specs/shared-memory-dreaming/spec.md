@@ -65,7 +65,7 @@ Codex public projection admission SHALL validate supported wire structure indepe
 - **WHEN** a Claude leaf is selected
 - **THEN** only its verified ancestor chain is usable evidence, and missing or ambiguous ancestry remains a gap rather than admitting another branch.
 - **WHEN** no Claude leaf is selected
-- **THEN** the public projection is navigation only and cannot support publication.
+- **THEN** the reader selects the branch ending at the newest public message as the default leaf, labels those events `default-leaf` with assurance below an explicit selection, keeps sibling branches navigation-only, and reports `active_branch_unverified` only when that newest message's ancestry cannot be resolved.
 
 #### Scenario: Benign native metadata between public messages
 - **WHEN** a Codex rollout contains tool-search items or a Claude transcript contains attachment records between two public messages

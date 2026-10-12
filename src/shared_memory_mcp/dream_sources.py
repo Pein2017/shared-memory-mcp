@@ -663,5 +663,32 @@ def _branches(source, events, gaps, state, excluded):
             excluded += sum(x['event_id'] not in selected for x in events)
             events = [{**x, 'branch': leaf} for x in events if x['event_id'] in selected]
         else:
-            gaps.append({'reason': 'active_branch_unverified'})
+            selected = _claude_default_leaf(events, state)
+            if selected is None:
+                gaps.append({'reason': 'active_branch_unverified'})
+            else:
+                # Default leaf: the branch ending at the newest public message. Its events may support
+                # publication with lower assurance than an explicit leaf; siblings stay navigation-only.
+                events = [{**x, 'branch': 'default-leaf', 'assurance': 'default-leaf'} if x['event_id'] in selected else x
+                          for x in events]
     return events, excluded
+
+
+def _claude_default_leaf(events, state):
+    """Ancestor identities of the newest public message (ties: last in file), or None if unresolved."""
+    from datetime import datetime, timezone
+    def moment(event):
+        try:
+            return datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00')).astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError):
+            return datetime.min.replace(tzinfo=timezone.utc)
+    if not events:
+        return None
+    newest = max(range(len(events)), key=lambda index: (moment(events[index]), index))
+    parents = {**state.get('claude_links', {}), **{x['event_id']: x['parent'] for x in events}}
+    conflicts = state.get('conflicting_ids', {})
+    selected, current = set(), events[newest]['event_id']
+    while isinstance(current, str) and current in parents and current not in selected and current not in conflicts:
+        selected.add(current)
+        current = parents[current]
+    return selected if current is None else None

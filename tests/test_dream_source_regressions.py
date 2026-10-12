@@ -1,5 +1,6 @@
 """Selected public history through the publisher on disposable CPU stores."""
 from copy import deepcopy
+import json
 import hashlib
 
 from dreaming_helpers import environment, claim, review, record_op, freeze_publish
@@ -62,17 +63,45 @@ def test_unselected_claude_branch_cannot_publish_but_selected_report_can(tmp_pat
     assert selected[1]['key'] in records[0]['body'] and wrong_key not in records[0]['body']
 
 
-def test_claude_without_selected_leaf_is_navigation_only(tmp_path):
+def two_branches(path):
+    # File order A, C, B; C is the newest public message by timestamp, B is the last line.
+    rows = [{**claude_message('A', None, role='user'), 'timestamp': '2026-10-12T10:00:00Z'},
+            {**claude_message('C', 'A'), 'timestamp': '2026-10-12T10:05:00Z'},
+            {**claude_message('B', 'A'), 'timestamp': '2026-10-12T10:03:00Z'}]
+    path.write_bytes(b''.join(line(row) for row in rows))
+
+
+def test_claude_default_leaf_publishes_newest_branch_and_keeps_sibling_navigation_only(tmp_path):
     _, store, caller, _, policy, _, path = environment(tmp_path)
-    path.write_bytes(line(claude_message('A', None)))
+    two_branches(path)
     source = {'id': 'unselected', 'path': str(path), 'format': 'claude',
               'schema': 'claude-jsonl-v1', 'native_version': 'fixture-v1'}
     engine = selected_engine(store, caller, policy, source)
     run = engine.start()
     rid, gen = run['run_id'], run['generation']
-    events = engine.materials(rid)['sources']['unselected']['events']
-    assert len(events) == 1 and events[0]['branch'] == 'unspecified'
-    _, result = freeze_publish(engine, rid, gen, [record_op('A', claim(events[0]['key'], level='report'))])
-    assert result['status'] == 'blocked'
-    assert result['unresolved'][0]['code'] == 'unverified_branch'
-    assert store._load('demo') == []
+    events = {e['event_id']: e for e in engine.materials(rid)['sources']['unselected']['events']}
+    assert {k: (e['branch'], e.get('assurance')) for k, e in events.items()} == {
+        'A': ('default-leaf', 'default-leaf'), 'C': ('default-leaf', 'default-leaf'), 'B': ('unspecified', None)}
+    _, sibling = freeze_publish(engine, rid, gen, [record_op('B', claim(events['B']['key'], level='report'))])
+    assert sibling['status'] == 'blocked' and sibling['unresolved'][0]['code'] == 'unverified_branch'
+    _, result = freeze_publish(engine, rid, gen, [record_op('C', claim(events['C']['key'], level='report'))],
+                               reconsider_reason='Use the default-leaf branch evidence.')
+    assert result['status'] == 'applied'
+    record = store._load('demo')[0]
+    notes = [json.loads(s['note'][len('dream-source-v1:'):]) for s in record['sources'] if s.get('note', '').startswith('dream-source-v1:')]
+    assert [n['selection_assurance'] for n in notes] == ['default-leaf']  # the label stays with the record
+    from dreaming_helpers import view_op
+    _, viewed = freeze_publish(engine, rid, gen, [view_op('V', claim(events['C']['key'], level='report'))])
+    assert viewed['status'] == 'applied'
+    assert engine.overview('research', scenario='research')['items'][0]['selection_assurance'] == ['default-leaf']
+
+
+def test_claude_explicit_older_leaf_overrides_the_default(tmp_path):
+    _, store, caller, _, policy, _, path = environment(tmp_path)
+    two_branches(path)
+    source = {'id': 'explicit', 'path': str(path), 'format': 'claude', 'schema': 'claude-jsonl-v1',
+              'native_version': 'fixture-v1', 'leaf_id': 'B'}
+    engine = selected_engine(store, caller, policy, source)
+    run = engine.start(sources=[{'grant_id': 'explicit', 'leaf_id': 'B'}])
+    events = engine.materials(run['run_id'])['sources']['explicit']['events']
+    assert [(e['event_id'], e['branch'], e.get('assurance')) for e in events] == [('A', 'B', None), ('B', 'B', None)]

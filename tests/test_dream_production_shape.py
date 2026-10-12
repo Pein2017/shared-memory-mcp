@@ -81,10 +81,9 @@ def test_production_history_reaches_reviewed_objective_then_pends_only_appended_
     session = next(sid for sid, p in paths.items() if p.name == 'prod-session.jsonl')
     worker = next(sid for sid, p in paths.items() if p.name == 'agent-b0worker.jsonl')
     codex = next(sid for sid, p in paths.items() if p.suffix == '.jsonl' and 'codex' in p.parts)
-    # One transcript holds the permanent compaction gap; unselected Claude branches are explicit gaps too.
+    # The only permanent gap is the compaction; both Claude transcripts resolve a default leaf.
     accepted = {(g['source_id'], g['reason']) for g in closed['item']['objective_progress']['accepted_gaps']}
-    assert accepted == {(session, 'compaction_originals_not_proven'), (session, 'active_branch_unverified'),
-                        (worker, 'active_branch_unverified')}
+    assert accepted == {(session, 'compaction_originals_not_proven')}
     assert codex not in {sid for sid, _ in accepted}
     # The benign Codex metadata never became a gap and the worker's events are delegated with its identity.
     events = {sid: m['events'] for item in listings for sid, m in item.get('sources', {}).items()}
@@ -106,7 +105,7 @@ def test_production_history_reaches_reviewed_objective_then_pends_only_appended_
     second = call(store, 'dream_start', {'caller': caller, 'review_objective': B})
     progress = second['item']['objective_progress']
     assert progress['remaining_sources'] == 1 and progress['remaining_memory'] == 0
-    assert {g['source_id'] for g in progress['accepted_gaps']} == {session, worker}
+    assert {g['source_id'] for g in progress['accepted_gaps']} == {session}
     listing = call(store, 'dream_materials', second['next']['args'])['item']
     pending = [e for m in listing['sources'].values() for e in m['events']]
     assert [e['preview'] for e in pending] == ['Appended fixture result.'] and listing['memory'] == []

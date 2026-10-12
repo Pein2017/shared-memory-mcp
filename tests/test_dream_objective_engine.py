@@ -28,7 +28,7 @@ def test_claude_history_root_reaches_catalog_and_retained_materials(tmp_path):
     sources = engine.materials(run['run_id'])['sources']
     events = [event for source in sources.values() for event in source['events'] if event['harness'] == 'claude']
     assert [event['text'] for event in events] == ['Historical Claude text.']
-    assert events[0]['branch'] == 'unspecified' and events[0]['human'] == 'unknown'
+    assert events[0]['branch'] == 'default-leaf' and events[0]['human'] == 'unknown'
 
 
 def historical_environment(tmp_path):

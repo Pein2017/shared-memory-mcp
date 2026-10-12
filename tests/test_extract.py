@@ -20,10 +20,11 @@ from shared_memory_mcp.operations import call
 PACKAGE = Path(__file__).resolve().parents[1]
 ROOT = {'format': 'codex', 'schema': 'codex-rollout-v1', 'native_version': 'fixture-v1'}
 FAKE = r'''#!{python}
-import hashlib, json, re, sys, time
+import hashlib, json, os, re, sys, time
 prompt = sys.stdin.read()
 with open({log!r}, 'a') as stream:
-    stream.write(json.dumps({{'argv': sys.argv[1:], 'worker': 'delegated worker' in prompt, 'prompt': prompt}}) + '\n')
+    stream.write(json.dumps({{'argv': sys.argv[1:], 'worker': 'delegated worker' in prompt, 'prompt': prompt,
+                             'marker': os.environ.get('SHARED_MEMORY_EXTRACTION')}}) + '\n')
 labels = re.findall(r'^\[(L\d+)\]', prompt, re.M)
 if 'QUOTA' in prompt:
     print('Error: quota exceeded for this account', file=sys.stderr); sys.exit(1)
@@ -33,6 +34,18 @@ if 'BADJSON' in prompt:
     print('I think the answer is probably fine'); sys.exit(0)
 if 'NOOUTPUT' in prompt:
     body = {{'candidates': [], 'no_output': True}}
+elif 'BENIGN' in prompt:
+    body = {{'candidates': [
+        {{'kind': 'observation', 'title': 'Worker was assigned a read-only Dreaming audit', 'body': 'The worker audited.',
+         'conditions': 'Fixture'}},
+        {{'kind': 'observation', 'category': 'mistake', 'title': 'Completed the governance comparison',
+         'body': 'The worker was asked for a read-only governance comparison.', 'cause': 'none', 'conditions': 'Fixture'}}],
+        'no_output': False}}
+elif 'delegated worker' in prompt:
+    tag = hashlib.sha256(prompt.encode()).hexdigest()[:8]
+    body = {{'candidates': [{{'kind': 'bug/root-cause', 'category': 'mistake', 'title': 'Fixture lesson ' + tag,
+                             'body': 'Edited the wrong file first ' + tag, 'cause': 'Did not read the owner first',
+                             'conditions': 'Fixture only', 'source_events': labels[:1]}}], 'no_output': False}}
 else:
     tag = hashlib.sha256(prompt.encode()).hexdigest()[:8]
     body = {{'candidates': [{{'kind': 'decision', 'title': 'Fixture lesson ' + tag, 'body': 'EXTRACTED_BODY ' + tag,
@@ -231,6 +244,74 @@ def test_worker_session_is_classified_with_parent_lineage(env):
     assert record['provenance']['role'] == 'worker' and record['provenance']['parent_session_id'] == 'lead-1'
     assert record['provenance']['session_id'] == 'child'
     assert record['details']['extensions']['extraction']['agent_id'] == 'Tesla'
+    assert record['details']['extensions']['extraction']['category'] == 'mistake'
+    assert record['body'].endswith('Likely cause: Did not read the owner first')
+
+
+def test_benign_worker_task_description_is_filtered_to_no_output(env):
+    path = env.transcript('benign', ['BENIGN: audit the Dreaming store read-only.', 'Done, no issues.'],
+                          session='child', parent='lead-1')
+    [session] = extract.run(env.store)['sessions']
+    assert env.calls()[0]['worker'] and 'capability gap' in env.calls()[0]['prompt']
+    assert session['state'] == 'no-output' and session['candidates'] == [] and env.candidates() == []
+    entry = next(e for e in env.row(path)['journal'] if 'filtered' in e)
+    assert entry['filtered'] == 2 and entry['outcome'] == 'no-output'
+
+
+def test_prompts_require_hypothesis_language_and_exclude_configuration(env):
+    env.transcript('root', ['Decided one thing.'])
+    extract.run(env.store)
+    prompt = env.calls()[0]['prompt']
+    assert '"hypothesis"' in prompt and 'configuration' in prompt and 'language of the transcript' in prompt
+
+
+def test_model_command_carries_marker_and_marker_suppresses_spawns(env, monkeypatch):
+    env.transcript('root', ['Decided one thing.'])
+    extract.run(env.store)
+    assert env.calls()[0]['marker'] == '1'
+    monkeypatch.setenv('SHARED_MEMORY_EXTRACTION', '1')
+    assert extract.spawn(env.store)['suppressed'] == 'recursive_spawn'
+    assert extract.run(env.store, startup=True)['status'] == 'suppressed_recursive_spawn'
+    log = (env.store.root / '.state' / 'extraction.log').read_text()
+    assert 'suppressed_recursive_spawn' in log
+    env.transcript('second', ['Another decision.'])
+    # The hook still returns recall inside an extraction model process, but starts nothing.
+    event = {'hook_event_name': 'SessionStart', 'source': 'startup', 'session_id': 'host', 'cwd': str(env.project)}
+    out = env.cli('hook', '--harness', 'codex', input=json.dumps(event), timeout=30)
+    assert '<shared-memory-context>' in json.loads(out.stdout)['hookSpecificOutput']['additionalContext']
+    startup = env.cli('extract', '--startup', timeout=30)
+    assert json.loads(startup.stdout)['status'] == 'suppressed_recursive_spawn'
+    time.sleep(1)
+    assert len(env.calls()) == 1 and env.row(env.history / 'second.jsonl') is None
+
+
+def test_hook_spawns_only_for_a_resolved_startup(env, tmp_path):
+    plain = tmp_path / 'extraction-cwd'
+    plain.mkdir()
+    repository = tmp_path / 'unregistered-repo'
+    repository.mkdir()
+    subprocess.run(['git', 'init', '-q', str(repository)], check=True)
+    spawned = []
+    for cwd, source, expected in ((plain, 'startup', 0), (repository, 'startup', 0), (env.project, 'resume', 0),
+                                  (env.project, 'startup', 1)):
+        event = {'hook_event_name': 'SessionStart', 'source': source, 'session_id': 'host', 'cwd': str(cwd)}
+        output = io.StringIO()
+        hook_main(env.store, 'codex', stdin=io.StringIO(json.dumps(event)), stdout=output, stderr=io.StringIO(),
+                  spawn=lambda store, trigger: spawned.append(trigger) or {'spawned': True})
+        if cwd == repository:  # the onboarding diagnostic is hook output, yet not a resolved project
+            assert 'onboarding diagnostic' in output.getvalue()
+        assert len(spawned) == expected, (cwd, source)
+    assert spawned[0] == {'cwd': str(env.project), 'session_id': 'host', 'source': 'startup', 'transcript_path': None,
+                          'harness': 'codex'}
+
+
+def test_sequential_startups_claim_different_sessions_and_never_loop(env):
+    paths = [env.transcript(f's{i}', [f'Decision {i}.'], age=7200 + i) for i in range(3)]
+    first = [s['transcript'] for s in extract.run(env.store, startup=True)['sessions']]
+    second = [s['transcript'] for s in extract.run(env.store, startup=True)['sessions']]
+    assert len(first) == 2 and len(second) == 1 and not set(first) & set(second)
+    assert sorted(first + second) == sorted(map(str, paths)) and len(env.calls()) == 3
+    assert extract.run(env.store, startup=True)['sessions'] == [] and len(env.calls()) == 3
 
 
 def test_header_detection_for_claude_and_pi_workers(tmp_path):
@@ -296,7 +377,8 @@ def test_unregistered_cwd_is_skipped_without_a_model_call(env, tmp_path):
 
 def test_startup_hook_returns_fast_while_extractor_is_slow(env):
     path = env.transcript('root', ['SLOW decision.'])
-    event = {'hook_event_name': 'SessionStart', 'source': 'resume', 'session_id': 'host', 'cwd': str(env.project)}
+    event = {'hook_event_name': 'SessionStart', 'source': 'resume', 'session_id': 'host', 'cwd': str(env.project),
+             'transcript_path': str(env.tmp / 'host-session.jsonl')}
     started = time.monotonic()
     resumed = env.cli('hook', '--harness', 'claude', input=json.dumps(event), timeout=30)
     assert resumed.returncode == 0 and not (env.store.root / '.state' / 'extraction.log').exists()
@@ -310,7 +392,8 @@ def test_startup_hook_returns_fast_while_extractor_is_slow(env):
     while time.monotonic() < deadline and (env.row(path) or {}).get('state') != 'extracted':
         time.sleep(0.2)
     assert env.row(path)['state'] == 'extracted' and len(env.calls()) == 1
-    assert json.loads((env.store.root / '.state' / 'extraction.log').read_text().splitlines()[-1])['status'] == 'ok'
+    lines = [json.loads(x) for x in (env.store.root / '.state' / 'extraction.log').read_text().splitlines()]
+    assert lines[0]['status'] == 'spawned' and lines[0]['trigger']['session_id'] == 'host' and lines[-1]['status'] == 'ok'
 
 
 def test_claude_subagent_start_emits_only_bounded_worker_identity(env):
@@ -351,3 +434,39 @@ def test_claude_subagent_start_emits_only_bounded_worker_identity(env):
     assert json.loads(out.stdout) == {} and 'diagnostic' in out.stderr
     out = env.cli('hook', '--harness', 'codex', input=json.dumps(event), timeout=30)
     assert json.loads(out.stdout) == {}
+
+
+def log_lines(env):
+    path = env.store.root / '.state' / 'extraction.log'
+    return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+
+@pytest.mark.parametrize('transcript', [None, 'missing'])
+def test_ephemeral_startup_never_spawns(env, transcript):
+    event = {'hook_event_name': 'SessionStart', 'source': 'startup', 'session_id': 'smoke', 'cwd': str(env.project)}
+    if transcript is None:
+        event['transcript_path'] = None
+    output = io.StringIO()
+    hook_main(env.store, 'claude', stdin=io.StringIO(json.dumps(event)), stdout=output, stderr=io.StringIO())
+    assert '<shared-memory-context>' in json.loads(output.getvalue())['hookSpecificOutput']['additionalContext']
+    assert [x['status'] for x in log_lines(env)] == ['skipped_ephemeral_trigger']
+
+
+def startup_spawn(env):
+    return extract.spawn(env.store, command=['true'], trigger={'session_id': 'host', 'transcript_path': '/persisted.jsonl'})
+
+
+def test_spawn_cooldown_is_store_wide(env):
+    assert startup_spawn(env)['spawned'] is True
+    time.sleep(1)
+    assert startup_spawn(env) == {'spawned': False, 'diagnostic': None, 'suppressed': 'spawn_cooldown'}
+    assert [x['status'] for x in log_lines(env)] == ['spawned', 'spawn_cooldown']
+    assert 0 < log_lines(env)[1]['next_after_seconds'] <= 1800
+
+
+def test_zero_cooldown_spawns_every_startup(env):
+    env.configure(min_spawn_interval_minutes=0)
+    assert startup_spawn(env)['spawned'] and startup_spawn(env)['spawned']
+    assert [x['status'] for x in log_lines(env)] == ['spawned', 'spawned']
+    env.configure(min_spawn_interval_minutes=-1)
+    assert load_extraction(env.store)['diagnostic'].startswith('invalid_extraction')
