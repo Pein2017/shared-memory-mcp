@@ -21,7 +21,7 @@ def test_wheel_installed_outside_checkout_has_self_contained_icon_metadata(tmp_p
     built = subprocess.run(['python','-m','pip','wheel',str(source),'--no-deps','--no-build-isolation',
                             '--wheel-dir',str(wheels)],capture_output=True,text=True)
     assert built.returncode == 0, built.stdout+built.stderr
-    wheel, = wheels.glob('shared_memory_mcp-0.2.0-*.whl')
+    wheel, = wheels.glob('shared_memory_mcp-0.3.0-*.whl')
     installed = tmp_path/'installed'
     result = subprocess.run(['python','-m','pip','install','--no-deps','--target',str(installed),str(wheel)],
                             capture_output=True,text=True)
@@ -43,7 +43,8 @@ async def verify():
    assert base64.b64decode(icon.src.split(',',1)[1])==logo
    assert initialized.serverInfo.websiteUrl=='https://github.com/Pein2017/shared-memory-mcp'
    names={t.name for t in tools.tools}
-   assert {'context','search','read','create','approve','update','delete','capture','curate','run_start','run_changes','overview_read','draft_publish'} <= names
+   assert {'context','search','read','capture','approve','supersede','withdraw','annotate','dream_start','dream_status','overview','dream_publish'} <= names
+   assert not {'create','update','delete','curate','run_start','draft_publish','overview_read'} & names
    assert len(names)==len(tools.tools)
    assert all(t.title and t.icons==initialized.serverInfo.icons for t in tools.tools)
    print(json.dumps({'module':shared_memory_mcp.__file__,'version':version('shared-memory-mcp'),'logo':base64.b64encode(logo).decode(),'tools':len(tools.tools)}))
@@ -56,5 +57,5 @@ asyncio.run(verify())
     assert verified.returncode == 0, verified.stdout+verified.stderr
     receipt = json.loads(verified.stdout)
     assert Path(receipt['module']).is_relative_to(installed)
-    assert receipt['version'] == '0.2.0' and receipt['tools'] >= 27
+    assert receipt['version'] == '0.3.0' and receipt['tools'] == 21
     assert base64.b64decode(receipt['logo']) == packaged_logo.read_bytes()

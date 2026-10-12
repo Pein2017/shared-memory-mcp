@@ -25,9 +25,24 @@ let session;
 try {
   await mkdir(project);
   await mkdir(agentDir);
+  // The fixture wraps {status, text} in the current packet contract for the actual caller argv.
   await writeFile(fixtureCli, `#!${process.execPath}\nimport {readFileSync,appendFileSync} from 'node:fs';
-appendFileSync(${JSON.stringify(calls)},JSON.stringify(process.argv.slice(2))+'\\n');
-process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mode: 0o700 });
+import {createHash} from 'node:crypto';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
+if (args.includes('extract')) process.exit(0);
+const raw = readFileSync(${JSON.stringify(response)},'utf8');
+let value; try { value = JSON.parse(raw); } catch { process.stdout.write(raw); process.exit(0); }
+if (value.status === 'ok') {
+  const cwd = args[args.indexOf('--cwd')+1], session_id = args[args.indexOf('--session-id')+1];
+  const revision = createHash('sha256').update(value.text).digest('hex');
+  value = { ...value, packet_version: 1, packet_revision: revision,
+    caller_context: { cwd, harness: 'pi', session_id, actor: 'pi', project_id: 'fixture' },
+    scope: { cwd, project_id: 'fixture' }, binding: { task_mode: null, query: '' },
+    parts: [{ kind: 'bootstrap', start: 0, end: Array.from(value.text).length, revision }],
+    part_offset_unit: 'unicode-codepoints' };
+}
+process.stdout.write(JSON.stringify(value));\n`, { mode: 0o700 });
   delete process.env.SHARED_MEMORY_CLI;
   delete process.env.SHARED_MEMORY_ROOT;
   await writeFile(wrapper, `import {createSharedMemoryExtension} from ${JSON.stringify(extension)};\n`
@@ -94,7 +109,9 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
     fromExtension: false, compactionEntry: { id: "fixture-compaction" } });
   messages = await session.extensionRunner.emitContext(messages);
   assert.equal(messages.length, 2);
-  const actualCalls = (await readFile(calls, "utf8")).trim().split("\n").map(JSON.parse);
+  const readCalls = async (kind) => (await readFile(calls, "utf8")).trim().split("\n").map(JSON.parse)
+    .filter((args) => args[2] === kind);
+  const actualCalls = await readCalls("context");
   assert.equal(actualCalls.length, 3, "startup/resume/compact refresh only");
   for (const args of actualCalls) {
     assert.equal(args[args.indexOf("--cwd") + 1], project);
@@ -113,7 +130,7 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   await writeFile(response, JSON.stringify({ status: "ok", text: firstText }));
   messages = await session.extensionRunner.emitContext(messages);
   assert.equal(messages[0].content, firstText, "changed session identity refreshes recalled content");
-  const identityCalls = (await readFile(calls, "utf8")).trim().split("\n").map(JSON.parse);
+  const identityCalls = await readCalls("context");
   assert.equal(identityCalls.length, 4);
   assert.equal(identityCalls.at(-1)[identityCalls.at(-1).indexOf("--session-id") + 1], manager.getSessionId());
   await writeFile(response, "malformed");
@@ -126,9 +143,9 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   await writeFile(response, JSON.stringify({ status: "unmapped", text: "must not be injected" }));
   await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
   assert.deepEqual(await session.extensionRunner.emitContext(messages), [user], "unmapped scope ignores all content");
-  const failedRefreshCalls = (await readFile(calls, "utf8")).trim().split("\n").length;
+  const failedRefreshCalls = (await readCalls("context")).length;
   await session.extensionRunner.emitContext(messages);
-  assert.equal((await readFile(calls, "utf8")).trim().split("\n").length, failedRefreshCalls,
+  assert.equal((await readCalls("context")).length, failedRefreshCalls,
     "failed refresh stays empty without retrying on every model request");
   const onboarding = "Shared-memory onboarding diagnostic: register the authorized fixture repository.\n"
     + "shared-memory --root /fixture/memory register --project-id fixture --project-root /fixture/repo";
@@ -140,10 +157,10 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   assert.equal(diagnosed[0].content, onboarding);
   assert.deepEqual(diagnosed.slice(1), [user]);
   assert.ok(!JSON.stringify(convertToLlm(diagnosed)).includes("FOREIGN-MEMORY-MUST-NOT-APPEAR"));
-  const diagnosticCalls = (await readFile(calls, "utf8")).trim().split("\n").length;
+  const diagnosticCalls = (await readCalls("context")).length;
   assert.deepEqual(await session.extensionRunner.emitContext([...diagnosed, ...continuation]),
     [...diagnosed, ...continuation], "ordinary growth retains a stable diagnostic prefix");
-  assert.equal((await readFile(calls, "utf8")).trim().split("\n").length, diagnosticCalls);
+  assert.equal((await readCalls("context")).length, diagnosticCalls);
   await writeFile(response, JSON.stringify({ status: "unmapped", text: "foreign",
     diagnostic: { onboarding: "Shared-memory onboarding diagnostic:" + "x".repeat(6001) } }));
   await session.extensionRunner.emit({ type: "session_start", reason: "reload" });
@@ -155,12 +172,21 @@ process.stdout.write(readFileSync(${JSON.stringify(response)},'utf8'));\n`, { mo
   assert.equal(registered[0].content, firstText);
   assert.ok(manager.getEntries().every((entry) => entry.type !== "custom_message"),
     "request context recall is never persisted in native session history");
+  // Extraction: one detached spawn for the root startup; reload/resume/compact/new never spawn.
+  for (let i = 0; i < 50 && !(await readCalls("extract")).length; i++) await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(await readCalls("extract"), [["--root", scratch, "extract", "--spawn"]], "root startup spawns once");
+  const startHandler = loader.getExtensions().extensions[0].handlers.get("session_start")[0];
+  const child = SessionManager.inMemory(project, { parentSession: join(scratch, "parent.jsonl") });
+  const childContext = { ...session.extensionRunner.createContext(), cwd: project, sessionManager: child };
+  await startHandler({ type: "session_start", reason: "startup" }, childContext);
+  await new Promise((r) => setTimeout(r, 500));
+  assert.equal((await readCalls("extract")).length, 1, "a subagent (parentSession) startup does not spawn");
   assert.deepEqual(errors, []);
   console.log(JSON.stringify({ status: "pass", installed_sdk: sdkRoot,
     boundary: "real extension loader + in-memory session + native event dispatch + convertToLlm",
     context_transport: "fixture executable", model_calls: 0,
     dreaming_options: process.env.SHARED_MEMORY_TEST_DREAM_PROFILE ? "explicit profile/scenario forwarded" : "absent by default",
-    checks: ["actual cwd", "session identity refresh", "startup/resume/compact", "ordinary-growth converted prefix", "leading system preserved", "user-level recall", "replacement", "actionable separate onboarding diagnostic", "diagnostic prefix stability", "fail closed", "bounded", "native history preserved"],
+    checks: ["actual cwd", "session identity refresh", "startup/resume/compact", "ordinary-growth converted prefix", "leading system preserved", "user-level recall", "replacement", "actionable separate onboarding diagnostic", "diagnostic prefix stability", "fail closed", "bounded", "native history preserved", "root-only extraction spawn"],
     cache_claim: "CPU prefix correctness only; provider cache behavior unmeasured" }));
 } finally {
   session?.dispose();

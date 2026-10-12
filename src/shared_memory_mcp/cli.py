@@ -42,7 +42,10 @@ def main(argv=None):
     project = commands.add_parser('project', help='Read-only cwd/Git project discovery and existing registration hints')
     project.add_argument('--cwd', required=True)
     project.add_argument('--project-id')
-    commands.add_parser('doctor')
+    doctor = commands.add_parser('doctor')
+    doctor.add_argument('--prune', action='store_true', help='List removable derived state (dry run unless --apply)')
+    doctor.add_argument('--apply', action='store_true', help='With --prune, remove exactly the listed paths')
+    doctor.add_argument('--sources', action='store_true', help='List records whose file:// sources are missing')
     recall = commands.add_parser('context')
     _add_context(recall)
     recall.add_argument('--query',default='')
@@ -54,6 +57,13 @@ def main(argv=None):
     recall.add_argument('--current-status', action='store_true')
     hook = commands.add_parser('hook')
     hook.add_argument('--harness',required=True,choices=['claude','codex'])
+    extract = commands.add_parser('extract', help='Leased cheap-model extraction of idle sessions into candidates')
+    extract.add_argument('--max', type=int, help='Sessions to claim (default: max_sessions_per_startup)')
+    extract.add_argument('--transcript', help='Extract this transcript under a configured history root')
+    extract.add_argument('--force', action='store_true', help='Re-extract even if unchanged since the last extraction')
+    extract.add_argument('--status', action='store_true', help='List per-transcript extraction state and journal')
+    extract.add_argument('--startup', action='store_true', help=argparse.SUPPRESS)
+    extract.add_argument('--spawn', action='store_true', help='Start a detached startup extraction when enabled')
     call = commands.add_parser('call')
     from .operations import PUBLIC
     call.add_argument('--tool', required=True, choices=PUBLIC)
@@ -68,7 +78,14 @@ def main(argv=None):
         elif args.command == 'project':
             result = store.project(args.cwd, args.project_id)
         elif args.command == 'doctor':
+            if args.apply and not args.prune:
+                raise MemoryError('invalid_input', '--apply requires --prune')
             result = store.doctor()
+            from .maintenance import missing_sources, prune
+            if args.prune:
+                result['prune'] = prune(store, apply=args.apply)
+            if args.sources:
+                result['sources'] = missing_sources(store)
         elif args.command == 'context':
             context = {key:getattr(args,key) for key in ('cwd','harness','session_id','actor','task_id','project_id') if getattr(args,key) is not None}
             result = store.context(context,args.query,args.limit,args.max_chars, task_mode=args.task_mode,
@@ -88,6 +105,15 @@ def main(argv=None):
             result = handle_dream(store, args)
             if result is None:
                 return 0
+        elif args.command == 'extract':
+            from . import extract as extraction
+            if args.status:
+                result = extraction.status(store)
+            elif args.spawn:
+                result = extraction.spawn(store)
+            else:
+                result = extraction.run(store, limit=args.max, transcript=args.transcript,
+                                        force=args.force, startup=args.startup)
         elif args.command == 'hook':
             from .adapters import hook_main
             return hook_main(store,args.harness)

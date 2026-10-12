@@ -162,11 +162,11 @@ def test_cli_call_rejection_and_completed_replay(env, legacy_class):
     def call(key):
         return subprocess.run([sys.executable, '-m', 'shared_memory_mcp.cli', '--root', str(store.root),
                                'call', '--tool', 'capture'],
-                              input=json.dumps({'context': ctx, 'record': RECORD, 'idempotency_key': key, 'review': REVIEW}),
+                              input=json.dumps({'caller': ctx, 'record': RECORD, 'idempotency_key': key, 'review': REVIEW}),
                               capture_output=True, text=True)
     replay = call('legacy')
     assert replay.returncode == 0, replay.stderr
-    assert json.loads(replay.stdout)['id'] == result['id']
+    assert json.loads(replay.stdout)['item']['id'] == result['id']
     rejected = call('new')
     assert rejected.returncode == 2
     assert json.loads(rejected.stdout)['diagnostic']['code'] == 'unsupported_kind'
@@ -196,29 +196,28 @@ def test_fresh_stdio_admits_completed_legacy_payload_but_rejects_new_writes(env,
                 await session.initialize()
                 tools = (await session.list_tools()).tools
                 names = {t.name for t in tools}
-                assert {'context','search','read','create','approve','update','delete','capture','curate',
-                        'run_start','run_changes','overview_read','draft_publish'} <= names
+                assert {'context','search','read','capture','approve','supersede','withdraw','annotate',
+                        'dream_start','dream_status','overview','dream_publish'} <= names
                 assert len(names) == len(tools)
-                record_schema = next(t for t in tools if t.name == 'create').inputSchema['$defs']['Record']
+                record_schema = next(t for t in tools if t.name == 'capture').inputSchema['$defs']['Record']
                 # The transport schema retains old handoff for exact historical replay.
                 # Admission below still rejects fresh handoff writes without a receipt.
                 assert 'handoff' in record_schema['properties']['kind']['enum']
                 async def call(tool, **args):
-                    result = await session.call_tool(tool, {'context': ctx, **args})
+                    result = await session.call_tool(tool, {'caller': ctx, **args})
                     assert not result.isError, result
                     return result.structuredContent or json.loads(result.content[0].text)
-                assert (await call('create', record=RECORD, idempotency_key='created'))['record']['id'] == proposed['id']
                 assert (await call('approve', id=old['id'], review=REVIEW, idempotency_key='approved'))['replayed']
-                assert (await call('update', id=successor['id'], old_ids=[old['id']], review=REVIEW, idempotency_key='updated'))['replayed']
-                assert (await call('capture', record=RECORD, review=REVIEW, idempotency_key='published'))['id'] == completed['id']
-                assert (await call('capture', record=RECORD, idempotency_key='candidate'))['id'] == candidate['id']
+                assert (await call('supersede', id=successor['id'], old_ids=[old['id']], review=REVIEW, idempotency_key='updated'))['replayed']
+                assert (await call('capture', record=RECORD, review=REVIEW, idempotency_key='published'))['item']['id'] == completed['id']
+                assert (await call('capture', record=RECORD, idempotency_key='candidate'))['item']['id'] == candidate['id']
                 for tool, args in (
                     ('capture', {'record': RECORD, 'review': REVIEW, 'idempotency_key': 'new'}),
-                    ('create', {'record': RECORD, 'idempotency_key': 'new-create'}),
+                    ('capture', {'record': RECORD, 'idempotency_key': 'new-create'}),
                     ('approve', {'id': proposed['id'], 'review': REVIEW, 'idempotency_key': 'new-publish'}),
                     ('capture', {'record': RECORD, 'review': {**REVIEW, 'reason': 'changed'}, 'idempotency_key': 'published'}),
                 ):
-                    rejected = await session.call_tool(tool, {'context': ctx, **args})
+                    rejected = await session.call_tool(tool, {'caller': ctx, **args})
                     assert rejected.isError, rejected
                 assert snapshot(store) == before
     asyncio.run(verify())

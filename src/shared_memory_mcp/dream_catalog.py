@@ -14,15 +14,17 @@ from .dream_sources import (MAX_BYTES, MAX_EVENTS, MAX_LINE, MAX_NATIVE_EVENT, P
                             _branches, validate_source, _range_digest, _same_file_range)
 
 MAX_HANDLES = 512
+# Append-only formats whose finished pass can continue over a later suffix (Pi rescans its whole graph).
+TAIL_FORMATS = {'codex', 'claude', 'document'}
 
 
 def validate_source_grants(store, grants):
-    if not isinstance(grants, list) or not 1 <= len(grants) <= 16:
-        _fail('invalid_policy', 'One to sixteen source grants are required')
+    if not isinstance(grants, list) or not 1 <= len(grants) <= 32:
+        _fail('invalid_policy', 'One to thirty-two source grants are required')
     ids = []
     for grant in grants:
         _keys(grant, {'id', 'path', 'kind', 'format', 'schema'},
-              {'id', 'path', 'kind', 'format', 'schema', 'native_version',
+              {'id', 'path', 'kind', 'format', 'schema', 'native_version', 'native_versions',
                'attestations', 'derived', 'lineage'}, 'source grant')
         if grant['kind'] not in {'file', 'directory'}:
             _fail('invalid_policy', 'Source kind must be file or directory')
@@ -317,7 +319,7 @@ class SourceCatalog:
         if not path.is_absolute() or '..' in path.parts:
             _fail('unsafe_source', 'Source path must be absolute without traversal')
         if (path.resolve().is_relative_to(self.store.root.resolve()) or
-                any(p == '.env' or p.startswith('.env.') or p in {'auth.json', 'credentials.json'} for p in path.parts)):
+                any(p == '.env' or p.startswith('.env.') or p in {'auth.json', 'credentials.json', '.credentials.json'} for p in path.parts)):
             _fail('unsafe_source', 'Credential files and raw memory store are not sources')
         return str(path)
 
@@ -331,10 +333,11 @@ class SourceCatalog:
             _fail('invalid_input', 'Frozen source cutoff must be a nonnegative byte position')
         if 'absolute_path' in selection:
             _keys(selection, {'absolute_path', 'format', 'schema'},
-                  {'absolute_path', 'format', 'schema', 'native_version', 'leaf_id', 'page', 'cutoff'}, 'inherited source selection')
+                  {'absolute_path', 'format', 'schema', 'native_version', 'native_versions', 'leaf_id', 'page', 'cutoff'},
+                  'inherited source selection')
             path = self._inherited_path(selection['absolute_path'])
             spec = {'id': 'inherited-' + _digest(path)[:32], 'path': path,
-                    **{k: selection[k] for k in ['format', 'schema', 'native_version', 'leaf_id'] if k in selection}}
+                    **{k: selection[k] for k in ['format', 'schema', 'native_version', 'native_versions', 'leaf_id'] if k in selection}}
             validate_source(spec, allow_instructions=True)
             grant = {k: v for k, v in spec.items() if k != 'leaf_id'}
             grant.update(kind='file', read_access='inherited')
@@ -524,6 +527,11 @@ class SourceCatalog:
                 prior = self._get(db, grant, 'read', cursor) if cursor else None
                 epoch = prior['epoch'] if prior else current_epoch
                 cutoff = prior.get('cutoff', epoch[2]) if prior else spec.get('_source_cutoff', epoch[2])
+                # An exhausted pass may continue over bytes appended to the same file after its cutoff;
+                # the consumed-prefix digest below still fences every previously read byte.
+                if (prior and not prior.get('completed') and prior['offset'] == cutoff and spec['format'] in TAIL_FORMATS
+                        and prior['epoch'][:2] == current_epoch[:2] and spec.get('_source_cutoff', cutoff) > cutoff):
+                    epoch, cutoff = current_epoch, spec['_source_cutoff']
                 if cutoff > current_epoch[2] or ('_source_cutoff' in spec and spec['_source_cutoff'] != cutoff):
                     _fail('source_changed', 'Source is smaller than the selected cutoff or the cutoff changed')
                 if prior and (prior['relative'] != relative or prior.get('leaf_id') != spec.get('leaf_id') or
@@ -538,6 +546,7 @@ class SourceCatalog:
                     if grant_identity is not None:
                         spec['_grant_root'], spec['_grant_identity'] = grant['path'], grant_identity
                     material = materialized_page(spec, db=db)
+                    material['tail_cursor'] = completed.get('tail_cursor')
                     if 'coverage' in completed:
                         structure_bytes = material['coverage']['structure_bytes']
                         saved_coverage = deepcopy(completed['coverage'])
@@ -629,6 +638,7 @@ class SourceCatalog:
                     state['pi_metadata'] = pi_reference
                 # Conflicts remain a page-local rejection; never trust cross-page branch ancestry.
                 state.pop('conflicting_ids', None)
+                state.pop('claude_links', None)
                 version = {'epoch': epoch, 'identity': epoch[:2], 'cutoff': cutoff, 'start': offset,
                            'consumed': position, 'page_sha256': digest.hexdigest(), 'prefix_sha256': prefix_sha256,
                            'schema': spec['schema']}
@@ -651,10 +661,13 @@ class SourceCatalog:
                     'version': version, 'coverage': coverage, 'cursor': None}
                 body = {'relative': relative, 'leaf_id': spec.get('leaf_id'), 'grant_identity': grant_identity, 'descriptor': descriptor}
                 page = self._put(db, grant, 'page', body)
-                next_cursor = self._put(db, grant, 'read', {'relative': relative, 'leaf_id': spec.get('leaf_id'),
+                continuation = {'relative': relative, 'leaf_id': spec.get('leaf_id'),
                     'grant_identity': grant_identity, 'epoch': epoch, 'offset': position, 'line': line_number,
                     'cutoff': cutoff, 'prefix_sha256': prefix_sha256,
-                    'state': state, 'pass_id': pass_id}) if position < cutoff else None
+                    'state': state, 'pass_id': pass_id}
+                next_cursor = self._put(db, grant, 'read', continuation) if position < cutoff else None
+                # A finished pass keeps one private continuation for a later appended suffix.
+                tail_cursor = self._put(db, grant, 'read', continuation) if position == cutoff and spec['format'] in TAIL_FORMATS else None
                 selected = ({**spec['_inherited_selection'], 'page': page} if '_inherited_selection' in spec
                             else {'grant_id': grant['id'], 'path': relative, 'page': page})
                 if '_source_cutoff' in spec:
@@ -663,13 +676,13 @@ class SourceCatalog:
                     selected['leaf_id'] = spec['leaf_id']
                 if cursor:
                     prior['completed'] = {'descriptor': descriptor, 'page_body': body, 'coverage': coverage,
-                        'selection': selected, 'next_cursor': next_cursor}
+                        'selection': selected, 'next_cursor': next_cursor, 'tail_cursor': tail_cursor}
                     # If capacity eviction removed this cursor, restore the
                     # completed response binding for immediate retry recovery.
                     db.execute('INSERT OR REPLACE INTO handles VALUES (?,?,?,?,?)',
                         (cursor, self.profile_id, _digest(grant), 'read', json.dumps(prior)))
                 self._gc_ids(db)
-                return {**material, 'selection': selected, 'next_cursor': next_cursor}
+                return {**material, 'selection': selected, 'next_cursor': next_cursor, 'tail_cursor': tail_cursor}
 
         except OSError:
             _fail('source_unavailable', 'Authorized source is unavailable')

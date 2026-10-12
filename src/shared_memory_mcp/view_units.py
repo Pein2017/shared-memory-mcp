@@ -117,10 +117,12 @@ def collect_units(engine, view, *, scenario, historical=None, target_project=Non
             result['units'].append({'id': reference, 'unit_id': narrative.get('id', reference),
                 'role': narrative.get('role', 'background'), 'index': index,
                 'level': claim['level'], 'text': render_claim(claim, compact=compact),
-                'as_of': document['as_of'], 'freshness': freshness,
+                'as_of': binding.get('as_of', document['as_of']), 'freshness': freshness,
                 'conditions': claim['conditions'], 'task_modes': claim.get('task_modes', []),
                 'read_hint': {'view': view, 'historical': revision, 'unit_index': index, 'scenario': scenario},
-                'sources': [{'path': source['path'], 'status': source_states[sid]} for sid, source in sources.items()]})
+                'sources': [{'path': source['path'], 'status': source_states[sid],
+                             **({'accepted_gaps': source['accepted_gaps']} if source.get('accepted_gaps') else {})}
+                            for sid, source in sources.items()]})
         if not result['units']:
             result['status'] = ('unverifiable' if any(v == 'unproven' for v in source_states.values()) else
                                 'invalidated' if result['unavailable_units'] else 'navigation')

@@ -70,3 +70,57 @@ class ViewReader:
     def overview(self, view, **kwargs):
         from .dream_views import read_view
         return read_view(self, view, **kwargs)
+
+
+EXTRACTION = 'extraction.json'
+EXTRACTION_DEFAULTS = {'version': 1, 'enabled': False, 'models': {}, 'idle_hours': 1, 'max_sessions_per_startup': 2,
+                       'max_age_days': 10, 'window_bytes': 204800, 'history_roots': []}
+
+
+def load_extraction(store):
+    """Store-owned extraction settings; any invalid or model-less configuration disables extraction.
+
+    Returns the normalized settings plus `model` ({name, argv, harness}) and a `diagnostic`
+    string when extraction cannot run. Callers report the diagnostic once and start nothing.
+    """
+    import shutil
+    from .core import MemoryError, _keys
+    from .dream_sources import validate_source
+    try:
+        raw = read_json(store, EXTRACTION)
+        config = {**EXTRACTION_DEFAULTS, **(raw or {})}
+        _keys(config, set(EXTRACTION_DEFAULTS), set(EXTRACTION_DEFAULTS) | {'preferred'}, 'extraction')
+        if config['version'] != 1 or type(config['enabled']) is not bool:
+            _fail('invalid_extraction', 'extraction.version must be 1 and enabled a boolean')
+        for name, low, high in (('idle_hours', 0, 24 * 30), ('max_sessions_per_startup', 1, 16),
+                                ('max_age_days', 1, 365), ('window_bytes', 4096, 8 * 1024 * 1024)):
+            if type(config[name]) not in (int, float) or isinstance(config[name], bool) or not low <= config[name] <= high:
+                _fail('invalid_extraction', f'extraction.{name} must be a number in [{low}, {high}]')
+        models = config['models']
+        if not isinstance(models, dict) or any(
+                not isinstance(argv, list) or not argv or not argv[0] or len(argv) > 64 or
+                any(not isinstance(x, str) or '\x00' in x for x in argv) for argv in models.values()):
+            _fail('invalid_extraction', 'extraction.models maps a harness to a nonempty argv list')
+        roots = config['history_roots']
+        if not isinstance(roots, list) or len(roots) > 16:
+            _fail('invalid_extraction', 'extraction.history_roots must be a bounded list')
+        for root in roots:
+            _keys(root, {'path', 'format', 'schema'}, {'path', 'format', 'schema', 'native_version', 'native_versions'}, 'history root')
+            if root['format'] not in {'codex', 'pi', 'claude'}:
+                _fail('invalid_extraction', 'Extraction history roots are native codex, pi or claude histories')
+            validate_source({'id': 'history-discovery', **root})
+        preferred = config.get('preferred')
+        if preferred is not None and preferred not in models:
+            _fail('invalid_extraction', 'extraction.preferred must name a configured model template')
+        names = [preferred] if preferred is not None else list(models)
+        # One selected model per run; a missing preferred binary never falls back to another template.
+        selected = next((name for name in names if shutil.which(models[name][0])), None)
+        if selected is None:
+            if not config['enabled']:
+                return {**config, 'model': None, 'diagnostic': None}
+            _fail('extraction_model_missing', 'No configured extraction model command is available on PATH')
+        argv = models[selected]
+        name = argv[argv.index('--model') + 1] if '--model' in argv[:-1] else selected
+        return {**config, 'model': {'harness': selected, 'name': name, 'argv': list(argv)}, 'diagnostic': None}
+    except MemoryError as exc:
+        return {**EXTRACTION_DEFAULTS, 'enabled': False, 'model': None, 'diagnostic': f'{exc.code}: {exc}'[:300]}

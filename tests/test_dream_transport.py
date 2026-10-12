@@ -37,65 +37,18 @@ def payload(response):
     return response.structuredContent or json.loads(response.content[0].text)
 
 
-@pytest.mark.parametrize('harness', ['codex', 'pi', 'claude'])
-def test_bound_stdio_denies_raw_paths_bindings_and_crud_then_publishes(tmp_path, harness):
-    pytest.importorskip('mcp')
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    _, store, caller, _, _, owner, human = environment(tmp_path)
-    caller = {**caller, 'harness': harness}
-    source_before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (owner, human)}
+def test_cli_takeover_and_publish_keep_the_original_effect_executor(tmp_path):
+    _, store, caller, *_ = environment(tmp_path)
     start = cli(store, caller, 'start')
     rid, generation = start['run_id'], str(start['generation'])
-    binding = ['--run-id', rid, '--generation', generation]
-    async def sequence():
-        advisory = StdioServerParameters(command=sys.executable, args=args_for(store, caller, 'serve', *binding), env=ENV)
-        async with stdio_client(advisory) as (reader, writer):
-            async with ClientSession(reader, writer) as session:
-                await session.initialize()
-                tools = (await session.list_tools()).tools
-                names = {t.name for t in tools}
-                assert names == {'run_observe', 'source_read', 'memory_read', 'draft_read', 'overview_read',
-                                 'draft_submit', 'coverage_mark', 'issue_suggest'}
-                assert all(t.annotations.readOnlyHint == (t.name in {'run_observe','source_read','memory_read','draft_read','overview_read'}) for t in tools)
-                before_policy = (store.root / 'dreaming/policy.json').read_bytes()
-                negatives = [('create', {}), ('capture', {}), ('curate', {}), ('update', {}), ('delete', {}),
-                             ('run_shell', {'command': 'unavailable'}), ('configure', {}), ('takeover', {}),
-                             ('draft_publish', {'revision': '0' * 64}),
-                             ('source_read', {'source_id': '/etc/passwd'}),
-                             ('source_read', {'source_id': 'owner', 'cwd': str(tmp_path)}),
-                             ('run_observe', {'profile': 'other', 'enable_publisher': True})]
-                for name, arguments in negatives:
-                    result = await session.call_tool(name, arguments)
-                    assert result.isError, (name, result)
-                assert store._load('demo') == []
-                assert (store.root / 'dreaming/policy.json').read_bytes() == before_policy
-                material = payload(await session.call_tool('source_read', {'source_id': 'owner'}))
-                key = material['sources']['owner']['events'][0]['key']
-                frozen = payload(await session.call_tool('draft_submit', {'operations': [record_op('A', claim(key)), view_op('V', claim('op:A'))]}))
-                assert payload(await session.call_tool('draft_read', {'revision': frozen['draft_revision']}))['operations']
-        publisher = StdioServerParameters(command=sys.executable, args=args_for(store, caller, 'serve', *binding, '--enable-publisher'), env=ENV)
-        async with stdio_client(publisher) as (reader, writer):
-            async with ClientSession(reader, writer) as session:
-                await session.initialize()
-                tools = (await session.list_tools()).tools
-                assert 'draft_publish' in {t.name for t in tools}
-                result = payload(await session.call_tool('draft_publish', {'revision': frozen['draft_revision']}))
-                assert result['status'] == 'applied'
-                assert payload(await session.call_tool('overview_read', {'view': 'research', 'scenario': 'research'}))['status'] == 'valid'
-                memory = payload(await session.call_tool('memory_read', {'query': 'fixture'}))
-                assert len(memory['items']) == 1
-        return frozen
-    frozen = asyncio.run(sequence())
-    assert len(store._load('demo')) == 1
-    for path, (raw, mtime) in source_before.items():
-        assert path.read_bytes() == raw and path.stat().st_mtime_ns == mtime
+    key = cli(store, caller, 'materials', '--run-id', rid, '--source-id', 'owner')['sources']['owner']['events'][0]['key']
+    frozen = cli(store, caller, 'freeze', '--run-id', rid, '--generation', generation,
+                 data=[record_op('A', claim(key)), view_op('V', claim('op:A'))])
     next_caller = {**caller, 'session_id': caller['session_id'] + '-continued'}
-    takeover = cli(store, next_caller, 'takeover', *binding)
-    assert takeover['generation'] == 2
+    assert cli(store, next_caller, 'takeover', '--run-id', rid, '--generation', generation)['generation'] == 2
     result = cli(store, next_caller, 'publish', '--run-id', rid, '--generation', '2', '--revision', frozen['draft_revision'])
     assert result['status'] == 'applied' and len(store._load('demo')) == 1
-    assert store._load('demo')[0]['provenance']['session_id'] == caller['session_id']
+    assert store._load('demo')[0]['provenance']['session_id'] == next_caller['session_id']
 
 
 @pytest.mark.parametrize('harness', ['codex', 'claude'])
@@ -129,6 +82,6 @@ def test_cli_partial_is_nonzero_and_default_manifest_stays_separate(tmp_path):
     from shared_memory_mcp.server import make_server
     advertised = asyncio.run(make_server(store).list_tools())
     names = {t.name for t in advertised}
-    assert {'context','search','read','create','approve','update','delete','capture','curate',
-            'run_start','run_changes','overview_read','draft_publish','issue_search','issue_resolve'} <= names
+    from shared_memory_mcp.operations import PUBLIC
+    assert tuple(t.name for t in advertised) == PUBLIC
     assert len(names) == len(advertised)

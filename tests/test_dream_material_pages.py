@@ -52,7 +52,11 @@ def test_all_parts_restore_tail_and_keep_original_evidence_and_coverage(tmp_path
         if cursor is None:
             break
     assert ''.join(chunks) == text and len(chunks) > 1
-    assert path.read_bytes() == before
+    # Reading records only the served attempt and read progress; evidence and coverage are unchanged.
+    unchanged = lambda run: {k: v for k, v in run.items() if k not in {'attempts', 'material_reads'}}
+    after = json.loads(path.read_bytes())
+    assert unchanged(after) == unchanged(json.loads(before))
+    assert after['attempts'][-1]['served'] == [event['key']]
     c = claim(event['key'], level='report' if history else 'recorded', text=text.splitlines()[-1])
     frozen, published = freeze_publish(engine, run['run_id'], run['generation'], [record_op('R', c)])
     assert published['status'] == 'applied'
@@ -223,30 +227,21 @@ def test_pi_body_reports_cache_eviction_rebuild_io(tmp_path, monkeypatch, catalo
     assert result['page']['verification_bytes'] - repeated['page']['verification_bytes'] == 2 * path.stat().st_size
 
 
-@pytest.mark.parametrize('mode', ['fixed', 'general', 'gateway'])
-def test_stdio_continues_without_expanding_source_grants(tmp_path, mode):
+def test_stdio_continues_without_expanding_source_grants(tmp_path):
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     _, store, caller, _, _, _, run, sid, event, text = long_run(tmp_path, catalog=True)
-    if mode == 'gateway':
-        args = ['-m', 'shared_memory_mcp.cli', '--root', str(store.root), 'dream', 'gateway', '--profile', 'fixture']
-    else:
-        args = args_for(store, caller, 'serve', *(['--run-id', run['run_id'], '--generation', str(run['generation'])] if mode == 'fixed' else []))
+    args = args_for(store, caller, 'serve')
 
     async def read_all():
         async with stdio_client(StdioServerParameters(command=sys.executable, args=args, env=ENV)) as (reader, writer):
             async with ClientSession(reader, writer) as session:
                 await session.initialize()
-                name = 'source_read' if mode == 'fixed' else 'run_materials'
-                arguments = {'source_id': sid, 'event_key': event['key'], 'max_chars': 2000}
-                if mode != 'fixed':
-                    arguments['run_id'] = run['run_id']
-                if mode == 'gateway':
-                    arguments['context'] = caller
-                assert (await session.call_tool(name, {**arguments, 'source_id': '/etc/passwd'})).isError
+                arguments = {'run_id': run['run_id'], 'source_id': sid, 'event_key': event['key'], 'max_chars': 2000}
+                assert (await session.call_tool('run_materials', {**arguments, 'source_id': '/etc/passwd'})).isError
                 parts = []
                 while True:
-                    result = payload(await session.call_tool(name, arguments))
+                    result = payload(await session.call_tool('run_materials', arguments))
                     parts.append(result['sources'][sid]['events'][0]['text'])
                     cursor = result['page']['next_cursor']
                     if cursor is None:
@@ -295,7 +290,8 @@ def test_large_native_event_body_pages_keep_identity_and_current_fences(tmp_path
             break
     assert ''.join(chunks) == text
     assert len(chunks) > 1
-    assert Path(store.root / 'dreaming/runs' / run['run_id'] / 'run.json').read_bytes() == saved
+    unchanged = lambda data: {k: v for k, v in json.loads(data).items() if k not in {'attempts', 'material_reads'}}
+    assert unchanged(Path(store.root / 'dreaming/runs' / run['run_id'] / 'run.json').read_bytes()) == unchanged(saved)
     first = engine.materials(run['run_id'], 'human', event_key=frozen['key'], max_chars=1000)
     # The continuation is fenced even when event and file lengths are unchanged.
     native.write_bytes(native.read_bytes().replace(b'unchanged limits', b'untrusted limits'))

@@ -8,7 +8,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 
-from .core import WORKFLOW_REMINDER, _digest, _fail, _json
+from .core import WORKFLOW_REMINDER, _digest, _fail, _json, assurance_rank
 from .narrative import ROLES, metadata
 
 DEFAULT_BYTES = 8000
@@ -47,7 +47,7 @@ def record_unit(record):
     level = details.get('statement_type', record['kind'])
     assurance = details.get('extensions', {}).get('live_review', {}).get('assurance')
     when = record.get('review', {}).get('reviewed_at', record['created_at'])
-    body = f"[{unit.get('role', 'evidence')}; {level}; as-of {when}] {text}"
+    body = f"[{unit.get('role', 'evidence')}; {level}; as-of {when}; {record.get('assurance', 'candidate')}] {text}"
     if details.get('conditions'):
         body += '\nConditions: ' + details['conditions']
     if assurance:
@@ -62,7 +62,8 @@ def record_unit(record):
             'level': level, 'text': body, 'as_of': when, 'task_modes': details.get('task_modes', []),
             'revision': _digest([record['content_digest'], record.get('curation_revision')]),
             'read_hint': {'ids': [record['id']]}, 'freshness': 'as-of',
-            'replaces': unit.get('replaces', []), 'conditions': details.get('conditions', '')}
+            'replaces': unit.get('replaces', []), 'conditions': details.get('conditions', ''),
+            'assurance': record.get('assurance', 'candidate')}
 
 
 def related_groups(records, selected):
@@ -115,7 +116,7 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
         _fail('context_budget', 'max_chars must be a nonnegative bounded explicit cap')
     if type(limit) is not int or not 1 <= limit <= 100 or not isinstance(query, str) or len(query) > 4096:
         _fail('invalid_input', 'Context requires a bounded query and item limit')
-    with store._gate():
+    with store._gate(read=True):
         scope, records, filtered, _ = collect(store, context)
         routing = load_routing(store, scope['project_id'])
         initial_basis = read_basis(store, scope['project_id'])
@@ -134,9 +135,10 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
     if query.strip():
         _, expansion = route_matches(routing, query)
         selected = rank(applicable, query, expansion)
-        selected.sort(key=lambda r: (-r['match']['score'] * (1.15 if task_mode in r.get('details', {}).get('task_modes', []) else 1.0), r['id']))
+        selected.sort(key=lambda r: (-r['match']['score'] * (1.15 if task_mode in r.get('details', {}).get('task_modes', []) else 1.0), assurance_rank(r), r['id']))
     else:
-        selected = [r for r in applicable if metadata(r) or r['id'] in background_ids]
+        # Same-worktree, same-task working memory is startup context for every task member.
+        selected = [r for r in applicable if metadata(r) or r['id'] in background_ids or r['scope'] == 'task']
     if mode_restriction:
         selected = [r for r in selected if mode_restriction['mode'] in r.get('details', {}).get('task_modes', [])]
     background = [r for r in applicable if metadata(r).get('role') in BACKGROUND_ROLES or
@@ -158,7 +160,7 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
     try:
         from .maintenance import CollaborationStore
         from .dream_records import render_claim
-        with store._gate():
+        with store._gate(read=True):
             _, preferences = CollaborationStore(store)._records(context)
         for preference in preferences:
             c = preference['claim']
@@ -172,8 +174,12 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
                 if len(preference['sources']) > len(routes):
                     routes.append(f"{len(preference['sources']) - len(routes)} more in full detail")
                 text += '\nSource routes: ' + '; '.join(routes)
+            published = next((e for e in reversed(preference['events']) if e['state'] == 'active'), {})
+            assurance = ('dreaming-reviewed' if published.get('key', '').startswith('dream:') else
+                         'self-reviewed' if published.get('executor', {}).get('session_id') == preference['provenance']['session_id']
+                         else 'cross-session-reviewed')
             units.append([{'id': 'collaboration:' + preference['id'], 'unit_id': n.get('id', preference['id']),
-                'role': 'preference', 'level': c['level'], 'text': text,
+                'role': 'preference', 'level': c['level'], 'text': text, 'assurance': assurance,
                 'as_of': preference['events'][-1]['at'], 'task_modes': modes,
                 'read_hint': {'collection': 'collaboration', 'ids': [preference['id']]},
                 'freshness': 'as-of', 'conditions': c['conditions']}])
@@ -202,6 +208,7 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
                         continue
                     if mode_restriction and mode_restriction['mode'] not in unit['task_modes']:
                         continue
+                    unit['assurance'] = 'dreaming-reviewed'  # views are published only by reviewed Dreaming runs
                     unit['text'] = f"[{unit['role']}; as-of {unit['as_of']}; {unit['freshness']}] " + unit['text']
                     if unit.get('sources'):
                         routes = [f"{source['path']} ({source['status']})" for source in unit['sources'][:2]]
@@ -234,7 +241,7 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
         routes = matched_routes[:min(limit, 2)]
     else:
         routes = routing['topics'][:min(limit, 3)]
-    with store._gate():
+    with store._gate(read=True):
         if store._resolve(context) != scope or read_basis(store, scope['project_id']) != initial_basis:
             return {'status': 'changed-during-read', 'text': '', 'items': [],
                     'diagnostic': {'code': 'context_basis_changed'},
@@ -296,7 +303,8 @@ def compose(store, context, query='', limit=8, max_chars=6000, *, task_mode=None
                 'parts': parts, 'part_offset_unit': 'unicode-codepoints',
                 'binding': {'task_mode': task_mode, 'query': query,
                             **({'current_status':True} if current_status else {})},
-                'items': [{k: u[k] for k in ('id', 'unit_id', 'role', 'read_hint', 'freshness')} for u in chosen],
+                'items': [{k: u[k] for k in ('id', 'unit_id', 'role', 'read_hint', 'freshness', 'assurance') if k in u}
+                          for u in chosen],
                 **({'continuation': deepcopy(deferred['read_hint'])} if deferred else {}),
                 'routes': [{'id': r['id'], 'sources': [ordinary_source(source) for source in r['sources']]}
                            for r in routes],

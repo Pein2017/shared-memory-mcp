@@ -58,7 +58,7 @@ runtime.registerProvider('memory-fixture', {api:'memory-fixture', apiKey:'cpu-fi
         await options?.onPayload?.({messages:context.messages}, model);
         const tool = phase !== 'resume' && index === 0;
         const block = tool ? {type:'toolCall', id:`persisted-context-${phase}`, name:'shared-memory_context',
-          arguments:{context:caller, ...binding}} : {type:'text',text:'CPU fixture completed.'};
+          arguments:{caller, ...binding}} : {type:'text',text:'CPU fixture completed.'};
         const final = {role:'assistant', api:model.api, provider:model.provider, model:model.id,
           content:[block], usage:structuredClone(usage), stopReason:tool ? 'toolUse' : 'stop', timestamp:Date.now()};
         const partial = {...final, content:[], stopReason:'pending'};

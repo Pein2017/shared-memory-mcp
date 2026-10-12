@@ -64,7 +64,7 @@ def test_inherited_discovery_has_bounded_pages_without_total_quota(tmp_path):
         assert c.read(absolute(files[-1]))['events'][0]['event_id'] == 'u1'
 
 
-@pytest.mark.parametrize('name', ['.env', '.env.local', 'credentials.json', 'auth.json'])
+@pytest.mark.parametrize('name', ['.env', '.env.local', 'credentials.json', '.credentials.json', 'auth.json'])
 def test_inherited_sensitive_paths_and_raw_store_excluded(tmp_path, name):
     c, _, path = inherited(tmp_path)
     forbidden = tmp_path / name

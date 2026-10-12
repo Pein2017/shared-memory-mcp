@@ -202,6 +202,31 @@ def claude_message(identifier, parent, *, role='assistant', text=None):
             'message': {'role': role, 'content': text or f'Synthetic branch {identifier} report.'}}
 
 
+@pytest.mark.parametrize('kind', ['file-history-snapshot', 'file-history-delta', 'queue-operation',
+    'ai-title', 'atis-latch', 'agent-name', 'bridge-session', 'cost-state', 'custom-title',
+    'last-prompt', 'mode', 'permission-mode'])
+def test_claude_versionless_metadata_does_not_expose_payload_or_break_public_coverage(tmp_path, kind):
+    spec = source(tmp_path, 'claude', [claude_message('A', None),
+        {'type': kind, 'private_payload': 'Must not be exposed.'}, claude_message('C', 'A')],
+        native_version='fixture-v1', leaf_id='C')
+    result = read_source(spec)
+    assert [event['event_id'] for event in result['events']] == ['A', 'C']
+    assert result['coverage']['complete']
+    assert 'Must not be exposed.' not in json.dumps(result)
+
+
+def test_claude_system_compaction_retains_gap_and_excludes_summary(tmp_path):
+    spec = source(tmp_path, 'claude', [claude_message('A', None),
+        {'type': 'system', 'subtype': 'compact_boundary', 'version': 'fixture-v1',
+         'content': 'Private compact summary.'}, claude_message('C', 'A')],
+        native_version='fixture-v1', leaf_id='C')
+    result = read_source(spec)
+    assert [event['event_id'] for event in result['events']] == ['A', 'C']
+    assert not result['coverage']['complete']
+    assert 'compaction_originals_not_proven' in {gap['reason'] for gap in result['coverage']['gaps']}
+    assert 'Private compact summary.' not in json.dumps(result)
+
+
 def test_claude_selects_only_verified_leaf_ancestors(tmp_path):
     spec = source(tmp_path, 'claude', [claude_message('A', None, role='user'),
                   claude_message('B', 'A'), claude_message('C', 'A')],

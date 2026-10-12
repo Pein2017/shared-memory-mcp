@@ -74,7 +74,7 @@ try {
   await session.extensionRunner.emitBeforeAgentStart("Synthetic startup probe", undefined, { sections: {} });
   const names = session.getAllTools().map((tool) => tool.name).filter((name) => name.startsWith("mcp__shared_memory__"));
   const operationNames = names.map(name => name.split('__').at(-1));
-  for (const name of ["context", "search", "read", "create", "approve", "update", "delete", "capture", "curate", "run_start", "draft_publish", "run_close"])
+  for (const name of ["context", "search", "read", "capture", "approve", "supersede", "withdraw", "annotate", "dream_start", "dream_publish", "dream_close"])
     assert.ok(operationNames.includes(name), name);
   assert.equal(new Set(names).size, names.length);
   assert.deepEqual(errors, []);

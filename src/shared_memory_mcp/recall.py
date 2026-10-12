@@ -9,13 +9,17 @@ import re
 import unicodedata
 from urllib.parse import parse_qs, unquote, urlparse
 
+from datetime import datetime, timezone
+
 from .core import (RECORD_ID, SAFE_ID, SEARCH_RESPONSE_BYTES, WORKFLOW_REMINDER,
-                   _digest, _fail, _json, _keys, _nonempty, _sources)
+                   _digest, _fail, _json, _keys, _nonempty, _sources, assurance_rank, lifecycle_overlay)
 from .curation import projected_records, read_json
 
 STOP = set('a an and are as at be been by can did do does for from had has have how i if in into is it its me my of on or our should so that the their then there these this to was we were what when where which who why with would you your'.split())
 TOKEN = re.compile(r'[\u3400-\u9fff]+|[^\W_]+(?:[_./:-][^\W_]+)*', re.UNICODE)
 CJK = re.compile(r'^[\u3400-\u9fff]+$')
+STATUSES = frozenset({'candidate', 'stale', 'active', 'withdrawn', 'withdrawal', 'superseded', 'expired', 'retired'})
+SCOPES = frozenset({'project', 'worktree', 'task'})
 WEIGHTS = {'title': 4.0, 'aliases': 4.0, 'topics': 2.0, 'summary': 2.5,
            'conditions': 1.0, 'body': 1.0, 'sources': 0.6}
 
@@ -105,7 +109,8 @@ def collect(store, context, include_inactive=False, include_shared=True):
     scope = store._resolve(context)
     from .dreaming import record_use_filter
     usable = record_use_filter(store)
-    own = [r for r in projected_records(store, scope['project_id']) if store._visible(r, scope)]
+    now = datetime.now(timezone.utc)
+    own = [{**r, **lifecycle_overlay(r, now)} for r in projected_records(store, scope['project_id']) if store._visible(r, scope)]
     records = [{**r, 'imported': False} for r in own
                if usable(r) and (include_inactive or r['effective_status'] == 'active')]
     filtered = len(own) - len(records)
@@ -119,7 +124,7 @@ def collect(store, context, include_inactive=False, include_shared=True):
                 if (usable(r) and r['scope'] == 'project' and r['effective_status'] == 'active' and
                         not r['recall_retired'] and d.get('domain') == 'engineering' and
                         scope['project_id'] in d.get('share_with', [])):
-                    records.append({**r, 'imported': True})
+                    records.append({**r, **lifecycle_overlay(r, now), 'imported': True})
     return scope, records, filtered, policy
 
 
@@ -203,6 +208,8 @@ def card(r):
     sources = sorted(r['sources'], key=lambda s: {'owner': 0, 'evidence': 1, 'origin': 2, 'derivative': 3}.get(roles.get(s['uri']), 2))
     short = len(r['body'].encode('utf-8')) <= 1024
     item = {k: r[k] for k in ('id', 'project_id', 'scope', 'kind', 'effective_status', 'title')}
+    if 'assurance' in r:
+        item['assurance'] = r['assurance']
     item.update(imported=r.get('imported', False), sources=[{**ordinary_source(s), **({'role': roles[s['uri']]} if s['uri'] in roles else {})} for s in sources[:2]],
                 source_count=len(sources), sources_omitted=max(0, len(sources) - 2),
                 read_hint={'ids': [r['id']], 'include_inactive': r['effective_status'] != 'active'},
@@ -270,24 +277,41 @@ def source_label(source):
 
 def minimal_card(r):
     return {k: r[k] for k in ('id', 'project_id', 'kind', 'effective_status')} | {
-        'title': r['title'][:160], 'imported': r.get('imported', False),
+        'title': r['title'][:160], 'imported': r.get('imported', False), 'assurance': r.get('assurance', 'candidate'),
         'read_required': True, 'preview_only': True, 'card_omitted': True,
         'reason': 'Full card exceeded this projection budget; read the complete record.',
         'read_hint': {'ids': [r['id']], 'include_inactive': r['effective_status'] != 'active'}}
 
 
+def _filter(value, name, allowed):
+    if value is None:
+        return None
+    if (not isinstance(value, list) or not value or any(not isinstance(x, str) for x in value) or
+            len(set(value)) != len(value) or not set(value) <= allowed):
+        _fail('invalid_input', f'{name} must be a list of distinct values from {sorted(allowed)}')
+    return sorted(value)
+
+
 def search(store, context, query, limit=20, include_inactive=False, *, domain=None,
-           offset=0, include_shared=True, expected_revision=None, task_mode=None, mode_restriction=None):
+           offset=0, include_shared=True, expected_revision=None, task_mode=None, mode_restriction=None,
+           statuses=None, scopes=None):
+    """Relevance search; with statuses/scopes it is the status audit over every visible
+    canonical record (any lifecycle state). Listing never makes a record recall-eligible."""
     from .context_packet import validate_mode
     validate_mode(task_mode, mode_restriction)
+    statuses, scopes = _filter(statuses, 'statuses', STATUSES), _filter(scopes, 'scopes', SCOPES)
+    if statuses is not None or scopes is not None:
+        include_inactive, include_shared = True, False
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
         _fail('invalid_input', 'limit must be between 1 and 100')
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         _fail('invalid_input', 'offset must be a nonnegative integer')
     if not isinstance(query, str) or len(query) > 4096:
         _fail('invalid_input', 'query must be a bounded string')
-    with store._gate():
+    with store._gate(read=True):
         scope, records, filtered, policy = collect(store, context, include_inactive, include_shared)
+        records = [r for r in records if (statuses is None or r['effective_status'] in statuses) and
+                   (scopes is None or r['scope'] in scopes)]
         routing = load_routing(store, scope['project_id'])
         routes, expansion = route_matches(routing, query)
         ranked = rank(records, query, expansion, domain)
@@ -295,15 +319,19 @@ def search(store, context, query, limit=20, include_inactive=False, *, domain=No
             for r in ranked:
                 if task_mode in r.get('details', {}).get('task_modes', []):
                     r['match']['score'] *= 1.15
-            ranked.sort(key=lambda r: (-r['match']['score'], r['id']))
+            ranked.sort(key=lambda r: (-r['match']['score'], assurance_rank(r), r['id']))
+        elif normalized(query):
+            # Assurance only breaks exact relevance ties; the stable sort keeps the frozen ranker's order otherwise.
+            ranked.sort(key=lambda r: (-r['match']['score'], assurance_rank(r)))
         if mode_restriction:
             ranked = [r for r in ranked if mode_restriction['mode'] in r.get('details', {}).get('task_modes', [])]
         revision = _digest({'scope': scope, 'query': normalized(query), 'domain': domain,
                             'task_mode': task_mode, 'mode_restriction': mode_restriction,
                             'visibility': [include_inactive, include_shared], 'routing': routing, 'sharing': policy,
+                            'statuses': statuses, 'scopes': scopes,
                             'records': sorted((r['project_id'], r['id'], r['content_digest'], r['effective_status'], r['curation_revision']) for r in records)})
     if expected_revision is not None and expected_revision != revision:
-        _fail('stale_search', 'Search corpus or query changed; restart with offset 0')
+        _fail('stale_search', 'Search corpus or query changed; restart without cursor')
     total = len(ranked)
     result = {'status': 'ok', 'scope': scope, 'items': [], 'routes': [], 'routes_omitted': len(routes),
               'query_expansion': expansion, 'corpus_revision': revision, 'offset': offset,
@@ -354,7 +382,7 @@ def read(store, context, ids, include_inactive=False, *, include_shared=True):
     if (not isinstance(ids, list) or not 1 <= len(ids) <= 100 or
             any(not isinstance(x, str) or not RECORD_ID.fullmatch(x) for x in ids)):
         _fail('invalid_input', 'ids must contain 1 to 100 canonical IDs')
-    with store._gate():
+    with store._gate(read=True):
         scope, records, filtered, _ = collect(store, context, include_inactive, include_shared)
         by_id = {r['id']: r for r in records}
         if len(by_id) != len(records):
@@ -386,7 +414,7 @@ def context_view(store, context, query='', limit=8, max_chars=6000):
         _fail('invalid_input', 'limit must be between 1 and 100')
     if not isinstance(query, str):
         _fail('invalid_input', 'query must be a string')
-    with store._gate():
+    with store._gate(read=True):
         scope = store._resolve(context)
         routing = load_routing(store, scope['project_id'])
     caller = {k: context[k] for k in ('harness', 'session_id', 'actor', 'task_id') if k in context}

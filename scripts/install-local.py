@@ -40,9 +40,15 @@ def atomic_text(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def add_hook(document: dict, command: str) -> dict:
+def add_hook(document: dict, command: str, *, harness: str = "codex", event: str = "SessionStart") -> dict:
+    """Own one command handler per event; the same command detects the event from stdin."""
+    if event not in {"SessionStart", "SubagentStart"} or event == "SubagentStart" and harness != "claude":
+        raise ValueError("Only Claude has an owned SubagentStart hook")
+    legacy_matcher = "startup|resume|clear|compact"
+    # SubagentStart matches every agent type: no matcher key.
+    matcher = None if event == "SubagentStart" else legacy_matcher + ("|fork" if harness == "claude" else "")
     result = copy.deepcopy(document)
-    groups = result.setdefault("hooks", {}).setdefault("SessionStart", [])
+    groups = result.setdefault("hooks", {}).setdefault(event, [])
     owned = [
         (group, handler)
         for group in groups
@@ -53,11 +59,19 @@ def add_hook(document: dict, command: str) -> dict:
         if len(owned) != 1:
             raise ValueError("Duplicate shared-memory hook; reconcile before installation")
         group, handler = owned[0]
-        if group.get("matcher") != "startup|resume|clear|compact" or handler.get("type") != "command":
+        if matcher is None:
+            if "matcher" in group or handler.get("type") != "command":
+                raise ValueError("Existing shared-memory hook has a conflicting contract")
+            return result
+        if group.get("matcher") not in {legacy_matcher, matcher} or handler.get("type") != "command":
             raise ValueError("Existing shared-memory hook has a conflicting contract")
+        if group.get("matcher") != matcher:
+            if len(group.get("hooks", [])) != 1:
+                raise ValueError("Cannot change the matcher of a hook group shared with another owner")
+            group["matcher"] = matcher
         return result
     groups.append({
-        "matcher": "startup|resume|clear|compact",
+        **({"matcher": matcher} if matcher is not None else {}),
         "hooks": [{"type": "command", "command": command, "timeout": 15}],
     })
     return result
@@ -311,7 +325,9 @@ def main() -> int:
         owned_legacy["claude"] = plan_owned_legacy(
             claude_native_config, "mcpServers", str(cli), root, profiles)
         claude_registered = claude_server_present(claude_native_config, str(cli), arguments)
-        updates[claude / "settings.json"] = add_hook(load_json(claude / "settings.json"), commands["claude"])
+        updates[claude / "settings.json"] = add_hook(
+            add_hook(load_json(claude / "settings.json"), commands["claude"], harness="claude"),
+            commands["claude"], harness="claude", event="SubagentStart")
     plan = {"status": "plan", "store": str(root), "source": str(source),
             "config_files": [str(p) for p in paths], "skill": str(skill_link),
             "pi_extension": str(wrapper), "mcp_name": NAME,
@@ -319,7 +335,9 @@ def main() -> int:
             "cutover_boundary": "Only exact old shared-memory-dreaming registrations; native memories and all unrelated entries are retained."}
     if claude:
         plan.update(claude_dir=str(claude), claude_hook={"command": commands["claude"],
-            "matcher": "startup|resume|clear|compact"},
+            "matcher": "startup|resume|clear|compact|fork"},
+            claude_subagent_hook={"command": commands["claude"], "event": "SubagentStart",
+                                  "output": "bounded worker caller identity only"},
             claude_mcp={"scope": "user", "registration": "identical" if claude_registered else "add"})
     if not args.apply:
         print(json.dumps(plan, ensure_ascii=False, indent=2))

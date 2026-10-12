@@ -160,7 +160,7 @@ def test_empty_mode_search_through_public_mcp(env):
                 await session.initialize()
                 for query in ('', ' \n\t\u3000'):
                     for mode in ('research', 'general'):
-                        result = await session.call_tool('search', {'context': ctx, 'query': query, 'task_mode': mode})
+                        result = await session.call_tool('search', {'caller': ctx, 'query': query, 'task_mode': mode})
                         assert not result.isError, result
                         payload = result.structuredContent or json.loads(result.content[0].text)
                         assert payload['status'] == 'ok' and payload['items'][0]['id'] == original['id']

@@ -752,7 +752,7 @@ def test_installed_sdk_search_envelope_and_text_representation_are_bounded(envir
         async with stdio_client(params) as (read,write):
             async with ClientSession(read,write) as session:
                 await session.initialize()
-                response=await session.call_tool('search',{'context':ctx,'query':'SDK large'})
+                response=await session.call_tool('search',{'caller':ctx,'query':'SDK large'})
                 assert not response.isError, response
                 payload=response.structuredContent or json.loads(response.content[0].text)
                 assert len(json.dumps(payload,ensure_ascii=False).encode('utf-8')) <= 12000
@@ -761,7 +761,20 @@ def test_installed_sdk_search_envelope_and_text_representation_are_bounded(envir
                 assert payload['items'][0]['body_omitted']
                 assert payload['items'][0]['sources'] == record['sources']
                 assert 'provenance' not in payload['items'][0]
-                full = await session.call_tool('read',{'context':ctx,'ids':[record['id']]})
+                full = await session.call_tool('read',{'caller':ctx,'ids':[record['id']]})
                 full_payload = full.structuredContent or json.loads(full.content[0].text)
-                assert full_payload['items'][0]['provenance'] == record['provenance']
+                cursor = full_payload['items'][0]['cursor']
+                fragments = []
+                while cursor:
+                    page = await session.call_tool('read',{'caller':ctx,'ids':[record['id']], 'cursor':cursor})
+                    assert not page.isError, page
+                    detail = page.structuredContent or json.loads(page.content[0].text)
+                    assert len(json.dumps(detail,ensure_ascii=False).encode('utf-8')) <= 12000
+                    assert len(page.content[0].text.encode('utf-8')) <= 12000
+                    fragments.append(detail['detail_page']['text'])
+                    cursor = detail['next_cursor']
+                restored = json.loads(''.join(fragments))
+                assert restored['body'] == record['body']
+                assert restored['sources'] == record['sources']
+                assert restored['provenance'] == record['provenance']
     asyncio.run(verify())

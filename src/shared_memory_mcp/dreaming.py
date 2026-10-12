@@ -24,7 +24,10 @@ POLICY = 'dreaming/policy.json'
 DISPOSITIONS = 'dreaming/dispositions.json'
 BUDGET_KEYS = {'source_bytes', 'events', 'operations', 'drafts', 'view_chars', 'view_bytes',
                'model_calls', 'input_tokens', 'output_tokens', 'seconds', 'repair_rounds'}
-INVOCATION_BUDGET_KEYS = {'source_bytes', 'events', 'operations', 'view_chars', 'view_bytes'}
+# Only these invocation bounds are enforced; drafts, seconds, repair_rounds, view_chars and
+# view_bytes remain validated historical policy fields that gate nothing.
+INVOCATION_BUDGET_KEYS = {'source_bytes', 'events', 'operations'}
+REVIEWED_STATES = {'processed', 'excluded', 'no-signal'}
 
 
 def _put(store, relative, document, *, immutable=False):
@@ -62,8 +65,8 @@ def validate_policy(store, policy):
         if not isinstance(roots, list) or len(roots) > 16:
             _fail('invalid_policy', 'History discovery roots must be a bounded list')
         for root in roots:
-            _keys(root, {'path', 'format', 'schema'}, {'path', 'format', 'schema', 'native_version'}, 'history root')
-            if profile.get('read_access') != 'inherited' or root['format'] not in {'codex', 'pi'}:
+            _keys(root, {'path', 'format', 'schema'}, {'path', 'format', 'schema', 'native_version', 'native_versions'}, 'history root')
+            if profile.get('read_access') != 'inherited' or root['format'] not in {'codex', 'pi', 'claude'}:
                 _fail('invalid_policy', 'Native history discovery requires trusted inherited reads')
             validate_source({'id': 'history-discovery', **root})
         if 'reader_projects' in profile:
@@ -292,13 +295,17 @@ class Dreaming:
         with self.store._gate():
             policy, profile = self._policy()
             runs = []
-            paths = sorted(safe_path(self.store, 'dreaming/active').glob(self.profile_id + '-*.json'))
+            # Exact lane names: profile `a` must not read profile `a-b` lanes.
+            lane = re.compile(re.escape(self.profile_id) + '-[0-9a-f]{64}\\.json')
+            paths = sorted(p for p in safe_path(self.store, 'dreaming/active').glob('*.json') if lane.fullmatch(p.name))
             if len(paths) > MAX_RECORDS:
                 _fail('dream_limit', 'Active lane inventory exceeds its supported bound')
             for path in paths:
                 active = read_json(self.store, path.relative_to(self.store.root))
                 run = read_json(self.store, f"dreaming/runs/{active['run_id']}/run.json")
-                if not run or run['profile_id'] != self.profile_id:
+                if not run or run['phase'] == 'closed':
+                    continue  # A stale marker of a closed or removed run is not a live lane.
+                if run['profile_id'] != self.profile_id:
                     _fail('dream_access_denied', 'Active index does not belong to this profile')
                 if run['target'] not in profile['target_projects']:
                     continue
@@ -324,7 +331,7 @@ class Dreaming:
             remaining = [item for item in runs if after is None or item['id'] > after]
             selected = remaining[:limit]
             next_cursor = _json({'revision': revision, 'after': selected[-1]['id']}) if len(remaining) > limit else None
-            grant_fields = {'id', 'path', 'kind', 'format', 'schema', 'native_version', 'leaf_id', 'derived'}
+            grant_fields = {'id', 'path', 'kind', 'format', 'schema', 'native_version', 'native_versions', 'leaf_id', 'derived'}
             return {'profile_id': self.profile_id, 'target_projects': profile['target_projects'],
                     'source_grants': [{k: deepcopy(v) for k, v in grant.items() if k in grant_fields} for grant in profile['source_grants']],
                     'actions': profile['actions'], 'publisher': self.publisher, 'active_runs': selected,
@@ -336,7 +343,9 @@ class Dreaming:
         return self._catalog().list(grant_id, relative_dir=relative_dir, cursor=cursor, limit=limit)
 
     def source_read(self, selection, *, cursor=None, max_bytes=262144, max_events=128):
-        return self._catalog().read(selection, cursor=cursor, max_bytes=max_bytes, max_events=max_events)
+        result = self._catalog().read(selection, cursor=cursor, max_bytes=max_bytes, max_events=max_events)
+        result.pop('tail_cursor', None)  # Internal objective continuation, not a caller capability.
+        return result
 
     def audit(self, *, target_project=None, **kwargs):
         from .dream_audit import audit_memory
@@ -419,25 +428,67 @@ class Dreaming:
                 if entry.get('epoch') == epoch:
                     continue
                 frozen = catalog.freeze({k: v for k, v in entry['selection'].items() if k not in {'cutoff', 'page'}})
+                appended = (entry.get('tail_cursor') and entry['status'] == 'processed' and frozen['identity'] == entry['identity']
+                            and entry['reviewed_offset'] == entry['cutoff'] < frozen['selection']['cutoff'])
+                # Same file grown past a fully reviewed cutoff: only the suffix becomes pending; the read
+                # verifies the reviewed prefix digest and falls back to a full re-review if it changed.
                 entry.update(selection=frozen['selection'], cutoff=frozen['selection']['cutoff'],
                              identity=frozen['identity'], epoch=frozen.get('epoch'),
-                             deferred_bytes=frozen['deferred_bytes'], reviewed_offset=0,
-                             cursor=None, pending_page=None, status='pending', gaps=[])
+                             deferred_bytes=frozen['deferred_bytes'],
+                             reviewed_offset=entry['reviewed_offset'] if appended else 0,
+                             cursor=entry['tail_cursor'] if appended else None, tail_cursor=None,
+                             appended=bool(appended), pending_page=None, status='pending', gaps=[])
             except (MemoryError, OSError) as exc:
-                entry.update(status='pending', gaps=[{'reason': getattr(exc, 'code', 'source_unavailable')}])
+                if entry['status'] != 'gap-accepted':  # An accepted whole-source gap stays closed until it reappears.
+                    entry.update(status='pending', gaps=[{'reason': getattr(exc, 'code', 'source_unavailable')}])
         for ref, supplied in memory_inputs.items():
             prior = progress['memory'].get(ref)
             if not prior or prior['revision'] != supplied['revision']:
                 progress['memory'][ref] = {**supplied, 'status': 'pending'}
         return progress
 
-    def start(self, *, target_project=None, sources=None, reconsider=None, review_objective=None):
+    def _baseline(self, target, previous):
+        """Target-keyed reviewed positions: the lane's last durable Run, merged once with legacy
+        objective-keyed checkpoints of the same target (minimum position wins; nothing advances)."""
+        from .dream_incremental import merge_positions
+        base = self._progress(previous) if previous and previous.get('objective_progress') else None
+        if base is not None and base.get('target_keyed'):
+            return base
+        found = [base] if base else []
+        legacy = re.compile(re.escape(self.profile_id) + '-[0-9a-f]{64}-objective\\.json')
+        for path in sorted(safe_path(self.store, 'dreaming/checkpoints').glob('*-objective.json')):
+            index = read_json(self.store, path.relative_to(self.store.root)) if legacy.fullmatch(path.name) else None
+            run_id = index.get('run_id') if isinstance(index, dict) else None
+            if not isinstance(run_id, str) or not RECORD_ID.fullmatch(run_id) or run_id == (previous or {}).get('id'):
+                continue
+            run = read_json(self.store, f'dreaming/runs/{run_id}/run.json')
+            if not run or run.get('target') != target or run.get('profile_id') != self.profile_id or not run.get('objective_progress'):
+                continue
+            try:
+                found.append(self._progress(run))
+            except MemoryError:
+                continue  # An unreadable legacy shard contributes no position; its material stays pending.
+        return merge_positions(found) if found else None
+
+    def start(self, *, target_project=None, sources=None, reconsider=None, review_objective=None, default_objective=False):
+        if default_objective:
+            from .dream_incremental import DEFAULT_OBJECTIVE
+            if review_objective is not None:
+                _fail('invalid_objective', 'Choose an explicit review_objective or the default objective')
+            review_objective = deepcopy(DEFAULT_OBJECTIVE)
         if review_objective is not None:
-            _keys(review_objective, {'id', 'question'}, {'id', 'question'}, 'review objective')
+            _keys(review_objective, {'id', 'question'}, {'id', 'question', 'reread'}, 'review objective')
             if (not isinstance(review_objective['id'], str) or not SAFE_ID.fullmatch(review_objective['id']) or
                     not isinstance(review_objective['question'], str) or not review_objective['question'].strip() or
                     len(review_objective['question']) > 2048):
                 _fail('invalid_objective', 'A review objective needs a stable id and bounded question')
+            reread = review_objective.get('reread', [None])
+            if not isinstance(reread, list) or not 1 <= len(reread) <= 16 or 'reread' in review_objective and any(
+                    not isinstance(i, dict) or set(i) != {'source_id', 'range'} or not isinstance(i['source_id'], str) or
+                    not isinstance(i['range'], list) or len(i['range']) != 2 or any(type(x) is not int for x in i['range']) or
+                    not 0 <= i['range'][0] < i['range'][1] for i in reread):
+                _fail('invalid_objective', 'reread is a list of at most sixteen {source_id, range: [start, end]} byte ranges')
+        question = lambda objective: {k: objective[k] for k in ('id', 'question')} if objective else None
         policy, profile = self._policy()
         target = self._target(profile, target_project)
         catalog = self._catalog(profile)
@@ -461,34 +512,60 @@ class Dreaming:
             previous = self._run(checkpoint['run_id'], check_caller=False) if checkpoint else None
             objective_path = f'dreaming/checkpoints/{self.profile_id}-{_digest([target, review_objective["id"]])}-objective.json' if review_objective else None
             if objective_path:
-                objective_index = read_json(self.store, objective_path)
-                if previous and previous.get('review_objective') == review_objective and previous.get('objective_progress'):
-                    pass  # Recover close-before-index using the durable Run.
-                elif objective_index:
-                    previous = self._run(objective_index['run_id'], check_caller=False)
-                    checkpoint = previous.get('checkpoint')
+                # Reviewed positions are keyed by target (the lane checkpoint); an objective identity
+                # keeps its question text, so a changed question needs a new identity.
+                index = read_json(self.store, objective_path)
+                indexed = read_json(self.store, f"dreaming/runs/{index['run_id']}/run.json") if (
+                    isinstance(index, dict) and isinstance(index.get('run_id'), str) and RECORD_ID.fullmatch(index['run_id'])) else None
+                if indexed and question(indexed.get('review_objective')) not in (None, question(review_objective)):
+                    _fail('objective_conflict', 'Changed objective text needs a new objective identity')
         old_objective = previous.get('review_objective') if previous else None
         if review_objective is None and old_objective is not None:
             review_objective = deepcopy(old_objective)
         if (review_objective and old_objective and review_objective['id'] == old_objective['id'] and
-                review_objective != old_objective):
+                question(review_objective) != question(old_objective)):
             _fail('objective_conflict', 'Changed objective text needs a new objective identity')
-        same_objective = review_objective == old_objective
-        progress, memory_inputs, staging_bytes = None, {}, 0
+        same_objective = review_objective == old_objective and not default_objective
+        progress, memory_inputs, staging_bytes, inventory = None, {}, 0, None
         if review_objective:
-            from .dream_incremental import objective_inventory, objective_batch, objective_observe
+            from .dream_incremental import (apply_reread, default_inventory, objective_batch, objective_inventory,
+                                            objective_observe, rebase, _in_scope)
             with self.store._gate():
                 memory_inputs = self._memory_inputs(target, policy)
-                progress = self._progress(previous) if previous and same_objective else None
-            if progress and checkpoint and checkpoint.get('objective_completion') in {'reviewed', 'disposed'}:
-                progress = self._increment(catalog, progress, memory_inputs)
+                base = self._baseline(target, previous)
+                if default_objective:
+                    inventory = default_inventory(self.store, target, base['memory'] if base else {})
+            if base is not None and not base.get('target_keyed'):
+                same_objective = False  # A one-time legacy merge starts a fresh objective over merged positions.
+            if default_objective:
+                # Memory triage only: carried source positions stay out of scope, so no native history is read.
+                scope = {'sources': [s['id'] for s in catalog.resolve(sources)] if sources else [], 'memory': inventory['refs']}
+                memory_inputs = {r: memory_inputs[r] for r in inventory['refs'] if r in memory_inputs}
+                progress = rebase(base, review_objective, scope=scope) if base else None
+                for ref, supplied in memory_inputs.items():
+                    if progress and ref in progress['memory'] and progress['memory'][ref]['revision'] != supplied['revision']:
+                        progress['memory'][ref] = {**supplied, 'status': 'pending'}
+            elif same_objective:
+                progress = base
+                if progress and checkpoint and checkpoint.get('objective_completion') in {'reviewed', 'disposed'}:
+                    progress = self._increment(catalog, progress, memory_inputs)
+            elif base is not None:
+                progress = self._increment(catalog, rebase(base, review_objective), memory_inputs)
             inputs = [{'ref': r, **v} for r, v in memory_inputs.items() if not progress or r not in progress['memory']]
-            progress = objective_inventory(catalog, review_objective, previous=progress, selections=sources,
+            progress = objective_inventory(catalog, review_objective, previous=progress,
+                                           selections=[] if default_objective and sources is None else sources,
                                            memory_refs=inputs, binding={'profile': self.profile_id, 'target': target})
+            if default_objective:
+                progress['scope'] = scope
+            if review_objective.get('reread') and not same_objective:
+                apply_reread(progress, review_objective['reread'])
+            progress['target_keyed'] = True
             progress, selections = objective_batch(catalog, progress, profile['budgets'])
             staging_bytes = progress['batch_read_bytes']
             profile['sources'] = catalog.resolve(selections)
-            memory_inputs = {r: {'revision': v['revision']} for r, v in progress['memory'].items()}
+            # Only pending memory is this batch's input; reviewed records at their reviewed revision stay settled.
+            memory_inputs = {r: {'revision': v['revision']} for r, v in progress['memory'].items()
+                             if _in_scope(progress, 'memory', r) and v['status'] not in REVIEWED_STATES}
         else:
             profile['sources'] = catalog.resolve(sources)
         materials, processed, read_bytes = self._collect(profile, previous if same_objective and not progress else None,
@@ -549,6 +626,8 @@ class Dreaming:
                 from .dream_incremental import save_objective
                 run.update(objective_progress=save_objective(self.store, progress), memory_inputs=memory_inputs,
                            objective_path=objective_path)
+            if inventory is not None:
+                run['memory_order'] = [r for r in inventory['refs'] if r in memory_inputs]
             self._save(run)
             _put(self.store, active_path, {'run_id': run_id})
             return {'status': 'created', 'run_id': run_id, 'generation': 1, 'coverage': run['coverage'],
@@ -558,7 +637,8 @@ class Dreaming:
                     'review_objective': deepcopy(review_objective), 'objective_completion': 'pending',
                     'pending_review': sum(value == 'pending-review' for value in processed.values()),
                     'unresolved_effects': 0, 'source_changes': source_changes,
-                    **({'objective_progress': objective_observe(progress)} if progress else {})}
+                    **({'objective_progress': objective_observe(progress)} if progress else {}),
+                    **({'inventory': inventory} if inventory is not None else {})}
 
     def inspect(self, run_id):
         self._policy()
@@ -566,6 +646,9 @@ class Dreaming:
             run = self._run(run_id, check_caller=False)
             result = {k: deepcopy(run[k]) for k in ('id', 'target', 'generation', 'attempts', 'phase',
                     'technical_outcome', 'coverage', 'processed', 'drafts', 'current_draft', 'receipts', 'unresolved', 'issues', 'model_calls', 'read_bytes')}
+            # Served keys stay internal; the caller sees how many were delivered to its attempt.
+            result['attempts'] = [{**{k: v for k, v in a.items() if k != 'served'}, 'served_events': len(a.get('served', []))}
+                                  for a in result['attempts']]
             result.update(review_objective=run.get('review_objective'),
                           objective_completion=run.get('objective_completion', 'unknown'),
                           source_changes=run.get('source_changes', 'unknown'),
@@ -579,8 +662,76 @@ class Dreaming:
                 result.update(issues=[], unresolved=[], access='changed; semantic excerpts withheld')
             return result
 
+    def _admitted(self, run, profile, source_id=None):
+        """Currently admitted frozen materials; this lookup serves nothing to the attempt."""
+        snapshot = {s['id']: s for s in run['profile_snapshot']['sources']}
+        allowed = {s['id'] for s in snapshot.values() if self._catalog(profile).authorized(s)}
+        if source_id is not None and source_id not in allowed:
+            _fail('dream_access_denied', 'Source is outside the bound allowlist')
+        output = {}
+        for sid, material in run['materials'].items():
+            if sid not in allowed or source_id is not None and source_id != sid:
+                continue
+            item = deepcopy(material)
+            item['events'] = [e for e in item['events'] if not self._forbidden_source(run, e)]
+            output[sid] = item
+        return snapshot, output
+
+    def _serve(self, run, keys):
+        """Record material delivered to the current attempt; the caller holds the writer gate."""
+        attempt = run['attempts'][-1]
+        served = set(attempt.get('served', []))
+        if run['phase'] == 'closed' or set(keys) <= served:
+            return False
+        attempt['served'] = sorted(served | set(keys))
+        return True
+
+    def _memory_text(self, run, ref):
+        """Exact frozen memory input text, or a stale/forbidden failure; never a substitute."""
+        kind, identifier = ref.split(':', 1)
+        records = projected_records(self.store, run['target']) if kind == 'record' else collaboration(self.store)
+        record = next((r for r in records if r['id'] == identifier), None)
+        if record is None or _digest(record) != run['memory_inputs'][ref]['revision']:
+            _fail('stale_dependency', 'Memory input changed since this Run froze its revision')
+        if kind == 'record' and not record_use_filter(self.store)(record):
+            _fail('source_forbidden', 'Memory input sources are prohibited for reuse')
+        if kind == 'record':
+            return record['title'], record['title'] + '\n\n' + record['body']
+        return record['claim']['topic'], record['claim']['topic'] + '\n\n' + record['claim']['text']
+
+    @staticmethod
+    def _material_offset(cursor, binding, text_digest, total):
+        if cursor is None:
+            return 0
+        try:
+            if not isinstance(cursor, str) or len(cursor) > 512 or not cursor.startswith('material-v1:'):
+                raise ValueError('Unbounded cursor')
+            position = _decode(cursor[len('material-v1:'):])
+            _keys(position, {'binding', 'text_sha256', 'offset'}, {'binding', 'text_sha256', 'offset'}, 'material cursor')
+            offset = position['offset']
+            if (position['binding'] != binding or position['text_sha256'] != text_digest
+                    or type(offset) is not int or not 0 <= offset < total):
+                raise ValueError('Cursor is not bound to this frozen text')
+            return offset
+        except (MemoryError, ValueError, TypeError):
+            _fail('invalid_cursor', 'Material cursor does not identify this frozen event and position')
+
+    @staticmethod
+    def _read_progress(run, key, offset, end, text_digest, total):
+        """Continuous bounded reads of one text; True when this read completed it."""
+        reads = run.setdefault('material_reads', {})
+        prior = reads.get(key, {})
+        if offset == 0 or prior.get('end') == offset and prior.get('text_sha256') == text_digest:
+            reads[key] = {'end': end, 'text_sha256': text_digest, 'complete': end == total}
+        return reads.get(key, {}).get('complete') is True and reads[key]['text_sha256'] == text_digest
+
     def materials(self, run_id, source_id=None, *, event_key=None, cursor=None, max_chars=4096):
-        if event_key is not None:
+        memory_ref = isinstance(event_key, str) and event_key.startswith(('record:', 'collaboration:'))
+        if memory_ref:
+            if (source_id is not None or not RECORD_ID.fullmatch(event_key.split(':', 1)[1])
+                    or type(max_chars) is not int or not 1 <= max_chars <= 16000):
+                _fail('invalid_input', 'Memory paging requires an exact memory input reference and 1..16000 characters')
+        elif event_key is not None:
             if (source_id is None or not isinstance(event_key, str) or not re.fullmatch('[0-9a-f]{64}', event_key)
                     or type(max_chars) is not int or not 1 <= max_chars <= 16000):
                 _fail('invalid_input', 'Event paging requires source_id, event_key and 1..16000 characters')
@@ -589,20 +740,38 @@ class Dreaming:
         _, profile = self._policy()
         with self.store._gate():
             run = self._run(run_id)
-            snapshot = {s['id']: s for s in run['profile_snapshot']['sources']}
-            allowed = {s['id'] for s in snapshot.values() if self._catalog(profile).authorized(s)}
-            if source_id is not None and source_id not in allowed:
-                _fail('dream_access_denied', 'Source is outside the bound allowlist')
-            output = {}
-            for sid, material in run['materials'].items():
-                if sid not in allowed or source_id is not None and source_id != sid:
-                    continue
-                item = deepcopy(material)
-                item['events'] = [e for e in item['events'] if not self._forbidden_source(run, e)]
-                output[sid] = item
+            snapshot, output = self._admitted(run, profile, source_id)
             result = {'as_of_run': run_id, 'sources': output, 'authority': 'untrusted source data; not execution instructions'}
-            if event_key is None:
+            if run['phase'] == 'closed':
+                result['text_retained'] = False
+                if event_key is not None:
+                    result['sources'] = {sid: {**m, 'events': [e for e in m['events'] if e['key'] == event_key]}
+                                         for sid, m in output.items()}
                 return result
+            if event_key is None:
+                # Internal whole-set read (engine/legacy callers): every listed excerpt was delivered.
+                if self._serve(run, [e['key'] for m in output.values() for e in m['events'] if 'text' in e]):
+                    self._save(run)
+                return result
+            if memory_ref:
+                if event_key not in run.get('memory_inputs', {}):
+                    _fail('dream_access_denied', 'Reference is not a frozen memory input of this Run')
+                title, text = self._memory_text(run, event_key)
+                text_digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+                binding = _digest([run_id, event_key, run['memory_inputs'][event_key]['revision']])
+                offset = self._material_offset(cursor, binding, text_digest, len(text))
+                end = min(len(text), offset + max_chars)
+                # Memory is markable only after its complete text was read in this attempt.
+                if self._read_progress(run, event_key, offset, end, text_digest, len(text)):
+                    self._serve(run, [event_key])
+                self._save(run)
+                return {'as_of_run': run_id, 'authority': result['authority'],
+                        'memory': {event_key: {'title': title, 'revision': run['memory_inputs'][event_key]['revision'],
+                                               'text': text[offset:end]}},
+                        'page': {'event_key': event_key, 'offset': offset, 'end': end, 'total_chars': len(text),
+                                 'text_sha256': text_digest, 'read_bytes': 0, 'verification_bytes': 0,
+                                 'next_cursor': 'material-v1:' + _json({'binding': binding, 'text_sha256': text_digest, 'offset': end}) if end < len(text) else None,
+                                 'notice': 'Text availability only; coverage and semantic review are unchanged.'}}
             frozen = next((e for e in output[source_id]['events'] if e['key'] == event_key), None)
             if frozen is None:
                 _fail('dream_access_denied', 'Event is not in the currently admitted frozen source')
@@ -620,37 +789,23 @@ class Dreaming:
                 initial['state'] = {'pi_metadata': deepcopy(metadata)}
         reconstructed = read_source(spec, max_bytes=version['consumed'], max_events=1024, cursor=initial)
         whole = next((e for e in reconstructed['events'] if e['key'] == event_key), None)
-        identity = lambda e: {k: v for k, v in e.items() if k not in {'text', 'excerpt_truncated'}}
+        identity = lambda e: {k: v for k, v in e.items() if k not in {'text', 'excerpt_truncated', 'text_chars'}}
         verification = [0]
         if (reconstructed['version'] != version or whole is None or identity(whole) != identity(frozen)
                 or check_snapshot(spec, version, verification=verification) != 'valid'):
             _fail('source_changed', 'Source bytes or their public interpretation differ from the frozen event')
         text = whole['text']
         text_digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
-        offset = 0
-        if cursor is not None:
-            try:
-                if not isinstance(cursor, str) or len(cursor) > 512 or not cursor.startswith('material-v1:'):
-                    raise ValueError('Unbounded cursor')
-                position = _decode(cursor[len('material-v1:'):])
-                _keys(position, {'binding', 'text_sha256', 'offset'}, {'binding', 'text_sha256', 'offset'}, 'material cursor')
-                offset = position['offset']
-                if (position['binding'] != binding or position['text_sha256'] != text_digest
-                        or type(offset) is not int or not 0 <= offset < len(text)):
-                    raise ValueError('Cursor is not bound to this frozen text')
-            except (MemoryError, ValueError, TypeError):
-                _fail('invalid_cursor', 'Material cursor does not identify this frozen event and position')
+        offset = self._material_offset(cursor, binding, text_digest, len(text))
         end = min(len(text), offset + max_chars)
         with self.store._gate():
             current = self._run(run_id)
             if (current['materials'][source_id]['version'] != version or not self._catalog().authorized(spec)
                     or self._forbidden_source(current, frozen)):
                 _fail('dream_access_denied', 'Frozen source access changed during material reconstruction')
-            reads = current.get('material_reads', {})
-            prior = reads.get(event_key, {})
-            if current.get('objective_progress') and (offset == 0 or prior.get('end') == offset and prior.get('text_sha256') == text_digest):
-                reads[event_key] = {'end': end, 'text_sha256': text_digest, 'complete': end == len(text)}
-                current['material_reads'] = reads
+            if current['phase'] != 'closed':
+                self._read_progress(current, event_key, offset, end, text_digest, len(text))
+                self._serve(current, [event_key])  # An explicit event read serves it to this attempt.
                 self._save(current)
         part = deepcopy(frozen)
         part['text'] = text[offset:end]
@@ -663,6 +818,78 @@ class Dreaming:
                           'verification_bytes': reconstructed['coverage']['verification_bytes'] + verification[0],
                           'notice': 'Text availability only; frozen coverage and semantic review are unchanged.'}
         return result
+
+    def material_summary(self, run_id, source_id=None, *, cursor=None, max_bytes=16384, preview_chars=200):
+        """Always-paged listing of frozen events and memory inputs within a serialized byte budget."""
+        if type(max_bytes) is not int or not 1024 <= max_bytes <= 262144:
+            _fail('invalid_input', 'A material summary page needs 1024..262144 bytes')
+        _, profile = self._policy()
+        with self.store._gate():
+            run = self._run(run_id)
+            _, output = self._admitted(run, profile, source_id)
+            retained = run['phase'] != 'closed'
+            rows = [(sid, e) for sid in sorted(output) for e in output[sid]['events']]
+            refs = sorted(run.get('memory_inputs', {})) if source_id is None else []
+            total = len(rows) + len(refs)
+            binding = _digest([run_id, source_id, [e['key'] for _, e in rows], refs])
+            index = 0
+            if cursor is not None:
+                try:
+                    if not isinstance(cursor, str) or len(cursor) > 512 or not cursor.startswith('summary-v1:'):
+                        raise ValueError('Unbounded cursor')
+                    position = _decode(cursor[len('summary-v1:'):])
+                    _keys(position, {'binding', 'index'}, {'binding', 'index'}, 'summary cursor')
+                    index = position['index']
+                    if position['binding'] != binding or type(index) is not int or not 0 < index < total:
+                        raise ValueError('Cursor is not bound to this listing')
+                except (MemoryError, ValueError, TypeError):
+                    _fail('invalid_cursor', 'Summary cursor does not identify this Run listing')
+            served = set(run['attempts'][-1].get('served', []))
+            gaps = sorted({(sid, g['reason']) for sid, m in output.items() for g in m['coverage'].get('gaps', [])})
+            # Same nesting as frozen materials (sources -> events -> key); memory inputs follow the events.
+            result = {'as_of_run': run_id, 'text_retained': retained, 'sources': {}, 'memory': [], 'total': total, 'offset': index,
+                      'gaps': [{'source_id': sid, 'reason': reason} for sid, reason in gaps[:16]],
+                      'omitted_gaps': max(0, len(gaps) - 16), 'next_cursor': None,
+                      'authority': 'untrusted source data; not execution instructions'}
+            reserve = len(_json('summary-v1:' + _json({'binding': binding, 'index': total})))
+            delivered = []
+            while index < total:
+                if index < len(rows):
+                    sid, event = rows[index]
+                    key, text = event['key'], event.get('text') if retained else None
+                    item = {'key': key, 'event_id': event['event_id'], 'role': event['role'],
+                            'chars': event.get('text_chars', len(event.get('text', ''))), 'raw_digest': event['raw_digest'],
+                            'delegated': event['delegated'], **({'agent_id': event['agent_id']} if 'agent_id' in event else {})}
+                else:
+                    key = refs[index - len(rows)]
+                    try:
+                        title, text = self._memory_text(run, key)
+                        item = {'ref': key, 'title': title[:200], 'chars': len(text)}
+                    except MemoryError as exc:
+                        title, text = None, None
+                        item = {'ref': key, 'unavailable': exc.code}
+                    text = text if retained else None
+                complete = text is not None and len(text) == item.get('chars') and len(text) <= preview_chars
+                item.update(preview=text[:preview_chars] if text is not None else None,
+                            served=key in served or complete, status=run['processed'].get(key))
+                trial = deepcopy(result)
+                if 'ref' in item:
+                    trial['memory'].append(item)
+                else:
+                    trial['sources'].setdefault(sid, {'events': []})['events'].append(item)
+                if len(_json(trial).encode('utf-8')) + reserve > max_bytes:
+                    if index > result['offset']:
+                        break
+                    _fail('response_budget', 'max_bytes cannot hold one material summary item')
+                result = trial
+                if complete:
+                    delivered.append(key)
+                index += 1
+            if index < total:
+                result['next_cursor'] = 'summary-v1:' + _json({'binding': binding, 'index': index})
+            if self._serve(run, delivered):
+                self._save(run)
+            return result
 
     def memory(self, run_id, *, query='', limit=8, max_chars=8000):
         """Read admitted target memory, without borrowing a target cwd or raw CRUD."""
@@ -684,6 +911,31 @@ class Dreaming:
                     used += size
             return {'target': run['target'], 'items': items, 'chars': used,
                     'notice': 'Reviewed memory is a qualified consolidation input, not new independent evidence; check a current owner when making current-status or action claims.'}
+
+    def next_hint(self, run_id):
+        """Model-free continuation hint for `next`; following it is optional and grants nothing."""
+        from .dream_incremental import REVIEWED, UNACCEPTABLE_GAPS
+        _, profile = self._policy()
+        with self.store._gate():
+            run = self._run(run_id, check_caller=False)
+            _, output = self._admitted(run, profile)
+            served = set(run['attempts'][-1].get('served', []))
+            order = run.get('memory_order') or sorted(run.get('memory_inputs', {}))
+            rows = [(sid, e['key']) for sid in sorted(output) for e in output[sid]['events']] + [(None, ref) for ref in order]
+            unmarked = [(sid, key) for sid, key in rows if run['processed'].get(key) not in REVIEWED]
+            empty = ['source:' + sid for sid, m in output.items() if not m['events'] and m.get('version')
+                     and run['processed'].get('source:' + sid) not in REVIEWED]
+            unserved = [(sid, key) for sid, key in unmarked if key not in served]
+            gaps = sorted({(sid, g['reason']) for sid, m in output.items() for g in m['coverage'].get('gaps', [])
+                           if g['reason'] not in UNACCEPTABLE_GAPS})
+            # Start with the bounded listing; a memory-only batch goes straight to its first input.
+            suggestion = None if not served and any(sid for sid, _ in rows) else unserved[0] if unserved else None
+            return {'phase': run['phase'], 'listing_first': not served and any(sid for sid, _ in rows),
+                    'suggested_source_id': suggestion[0] if suggestion else None,
+                    'suggested_event_key': suggestion[1] if suggestion else None,
+                    'markable': ([key for _, key in unmarked if key in served] + empty)[:64],
+                    'pending_counts': {'unserved': len(unserved), 'unmarked': len(unmarked) + len(empty), 'gaps': len(gaps)},
+                    'gaps': [{'source_id': sid, 'reason': reason} for sid, reason in gaps[:16]]}
 
     def takeover(self, run_id, expected_generation):
         """Explicit operator continuation. Never a model-facing automatic takeover."""
@@ -817,35 +1069,46 @@ class Dreaming:
             validate_review(review)
         return events, dependencies
 
-    def mark_processed(self, run_id, generation, statuses):
-        self._policy()
+    def _check_coverage(self, run, statuses):
+        """Marks bind frozen identities; reviewed states require material served to this attempt."""
         if not isinstance(statuses, dict) or len(statuses) > 128:
             _fail('invalid_input', 'Expected a bounded event/status mapping')
+        if run['phase'] == 'closed':
+            _fail('closed_run', 'Closed coverage cannot be rewritten')
+        events = self._events(run)
+        empty_sources = {'source:' + sid for sid, m in run['materials'].items() if not m['events'] and m.get('version')}
+        memory_inputs = run.get('memory_inputs', {})
+        current_inputs = self._memory_inputs(run['target'], self._policy()[0]) if memory_inputs else {}
+        served = set(run['attempts'][-1].get('served', []))
+        for key, status in statuses.items():
+            if key not in set(events) | empty_sources | set(memory_inputs) or status not in {'processed', 'excluded', 'no-signal', 'pending-review'}:
+                _fail('invalid_input', 'Coverage must identify frozen events and explicit processing states')
+            if key in memory_inputs and current_inputs.get(key) != memory_inputs[key]:
+                _fail('stale_dependency', 'Memory review must bind the frozen canonical revision')
+            if status != 'pending-review' and key not in served and key not in empty_sources:
+                _fail('unserved_event', f'Read `{key}` with dream_materials in this attempt before marking it {status}')
+        return statuses
+
+    def mark_processed(self, run_id, generation, statuses):
+        self._policy()
         with self.store._gate():
             run = self._run(run_id, generation)
-            if run['phase'] == 'closed':
-                _fail('closed_run', 'Closed coverage cannot be rewritten')
-            events = self._events(run)
-            empty_sources = {'source:' + sid for sid, m in run['materials'].items() if not m['events'] and m.get('version')}
-            memory_inputs = run.get('memory_inputs', {})
-            current_inputs = self._memory_inputs(run['target'], self._policy()[0]) if memory_inputs else {}
-            for key, status in statuses.items():
-                if key not in set(events) | empty_sources | set(memory_inputs) or status not in {'processed', 'excluded', 'no-signal', 'pending-review'}:
-                    _fail('invalid_input', 'Coverage must identify frozen events and explicit processing states')
-                if key in memory_inputs and current_inputs.get(key) != memory_inputs[key]:
-                    _fail('stale_dependency', 'Memory review must bind the frozen canonical revision')
+            self._check_coverage(run, statuses)
             run['processed'].update(statuses)
             self._save(run)
             return {'status': 'recorded', 'processed': run['processed']}
 
-    def freeze(self, run_id, generation, operations, *, reconsider_reason=None):
+    def freeze(self, run_id, generation, operations, *, reconsider_reason=None, coverage=None):
+        """Freeze operations and optional verified coverage marks; both take effect only at publish."""
         policy, profile = self._policy()
-        if not isinstance(operations, list) or not 1 <= len(operations) <= profile['budgets']['operations']:
+        if not isinstance(operations, list) or not int(coverage is None) <= len(operations) <= profile['budgets']['operations']:
             _fail('draft_limit', 'Operations exceed the selected working-set bound')
         with self.store._gate():
             run = self._run(run_id, generation)
             if run['phase'] == 'closed':
                 _fail('draft_limit', 'Closed Runs cannot accept replacement drafts')
+            if coverage is not None:
+                self._check_coverage(run, coverage)
             if run['current_draft']:
                 previous = self._draft(run, run['current_draft'])
                 outstanding = [o for o in previous['operations'] if o['key'] not in run['receipts']]
@@ -920,6 +1183,8 @@ class Dreaming:
             draft = {'version': 1, 'run_id': run_id, 'serial': serial, 'operations': ops,
                      'basis': basis, 'source_revision': run['source_revision'],
                      'review_executor': self.caller, 'reconsider_reason': reconsider_reason}
+            if coverage is not None:
+                draft['coverage'] = dict(coverage)
             created_refs = list(resolved_refs.values())
             draft['created_refs'] = created_refs
             draft['operation_bases'] = {o['id']: self._operation_basis(run, o, created_refs) for o in ops}
@@ -930,7 +1195,8 @@ class Dreaming:
             run['drafts'].append(revision)
             self._save(run)
             return {'status': 'frozen', 'run_id': run_id, 'generation': generation, 'draft_revision': revision,
-                    'operations': [{'id': o['id'], 'action': o['action'], 'reserved_id': o['reserved_id']} for o in ops]}
+                    'operations': [{'id': o['id'], 'action': o['action'], 'reserved_id': o['reserved_id']} for o in ops],
+                    **({'coverage': {'status': 'staged-until-publish', 'processed': dict(coverage)}} if coverage is not None else {})}
 
     def _draft(self, run, revision):
         if not isinstance(revision, str) or not re.fullmatch('[0-9a-f]{64}', revision):
@@ -951,6 +1217,7 @@ class Dreaming:
                     draft['basis']['dispositions'] != _digest(dispositions(self.store))):
                 return {'status': 'invalidated', 'operations': [], 'reason': 'Current policy/disposition differs; review source access again'}
             return {'status': 'draft', 'revision': revision, 'operations': draft['operations'],
+                    **({'coverage': draft['coverage']} if 'coverage' in draft else {}),
                     'source_revision': draft['source_revision'], 'publication_is_not_truth': True}
 
     def _intent_path(self, run, operation):
@@ -1192,12 +1459,18 @@ class Dreaming:
             return receipt
 
     def publish(self, run_id, generation, revision):
-        if not self.publisher:
-            _fail('advisory_only', 'This endpoint can draft only; use a separately bound trusted publisher')
         self._policy()
         with self.store._gate():
             run = self._run(run_id, generation)
-            draft = self._draft(run, revision)
+            try:
+                draft = self._draft(run, revision)
+            except MemoryError:
+                draft = None
+                if self.publisher:
+                    raise
+        # Only an existing coverage-only draft, which changes no canonical memory, is open to advisory executors.
+        if not self.publisher and (draft is None or draft['operations']):
+            _fail('advisory_only', 'This endpoint can draft only; use a separately bound trusted publisher')
         # Already acknowledged operations require no source reread. Unknown
         # effects still reconcile from their immutable canonical evidence.
         pending = any(o['key'] not in run['receipts'] for o in draft['operations'])
@@ -1215,16 +1488,45 @@ class Dreaming:
                     raise
         with self.store._gate():
             run = self._run(run_id, generation)
-            if run['current_draft'] != revision:
+            if run['current_draft'] != revision or run['phase'] == 'closed':
                 _fail('stale_draft', 'A concurrent review selected another draft')
             run['unresolved'] = errors
             status = 'partial' if errors and outcomes else 'blocked' if errors else 'applied'
             run.update(phase=status, technical_outcome='ok' if not errors else status)
+            coverage_key = f"dream:{run_id}:{draft['serial']}:coverage"
+            if 'coverage' in draft and not errors and coverage_key not in run['receipts']:
+                # Marks land in the same durable write that acknowledges the draft's effects.
+                run['processed'].update(draft['coverage'])
+                run['receipts'][coverage_key] = {'operation_id': 'coverage', 'operation_digest': _digest(draft['coverage']),
+                                                 'paths': [], 'executor': draft['review_executor'],
+                                                 'acknowledged_by': self.caller, 'replayed': False}
             self._save(run)
         return {'status': status, 'applied': outcomes, 'unresolved': errors,
+                **({'coverage': 'applied' if coverage_key in run['receipts'] else 'not-applied'} if 'coverage' in draft else {}),
                 'scientific_validation': 'not implied by publication'}
 
-    def close(self, run_id, generation, *, abandon_reason=None, objective_outcome=None):
+    def _accepted_gaps(self, run, accept_gaps):
+        """Each accepted gap names a permanent gap this Run actually observed for that source."""
+        from .dream_incremental import UNACCEPTABLE_GAPS
+        if not run.get('objective_progress'):
+            _fail('invalid_input', 'Accepted gaps belong to objective review Runs')
+        if not isinstance(accept_gaps, list) or not 1 <= len(accept_gaps) <= 16:
+            _fail('invalid_input', 'accept_gaps is a list of one to sixteen {source_id, reason, note} entries')
+        progress, accepted = self._progress(run), {}
+        for gap in accept_gaps:
+            _keys(gap, {'source_id', 'reason', 'note'}, {'source_id', 'reason', 'note'}, 'accepted gap')
+            for field in ('source_id', 'reason', 'note'):
+                _nonempty(gap[field], 'accepted gap ' + field)
+                if len(gap[field]) > 2048:
+                    _fail('invalid_input', 'Accepted gap fields are bounded text')
+            observed = {g['reason'] for g in run['materials'].get(gap['source_id'], {}).get('coverage', {}).get('gaps', [])}
+            observed |= {g['reason'] for g in progress['sources'].get(gap['source_id'], {}).get('gaps', [])}
+            if gap['reason'] in UNACCEPTABLE_GAPS or gap['reason'] not in observed:
+                _fail('invalid_input', f"No outstanding permanent gap `{gap['reason']}` for source `{gap['source_id']}`")
+            accepted.setdefault(gap['source_id'], []).append({'reason': gap['reason'], 'note': gap['note']})
+        return accepted
+
+    def close(self, run_id, generation, *, abandon_reason=None, objective_outcome=None, accept_gaps=None):
         if objective_outcome is not None and objective_outcome not in {'reviewed', 'disposed'}:
             _fail('invalid_objective', 'Objective outcome must be reviewed, disposed, or remain pending')
         _, profile = self._policy()
@@ -1255,6 +1557,8 @@ class Dreaming:
                     _fail('unresolved_effect', 'A visible or ambiguous effect must be reconciled before abandonment')
             if abandon_reason:
                 _nonempty(abandon_reason, 'abandon_reason')
+            if accept_gaps is not None:
+                run['accepted_gaps'] = self._accepted_gaps(run, accept_gaps)
             current_basis = self._basis(self._effective(run))
             basis_changed = current_basis != run['working_basis']
             if run.get('closure_bases'):
@@ -1277,7 +1581,8 @@ class Dreaming:
                                      'fingerprint': _digest({'sources': run['source_revision'], 'basis': current_basis}),
                                      'source_versions': {k: v['version'] for k, v in run['materials'].items()},
                                      'unprocessed_events': len(missing), 'review_objective': run.get('review_objective'),
-                                     'objective_completion': run['objective_completion']}
+                                     'objective_completion': run['objective_completion'],
+                                     **({'accepted_gaps': run['accepted_gaps']} if run.get('accepted_gaps') else {})}
                 if run.get('objective_progress'):
                     from .dream_incremental import objective_close, objective_observe, save_objective
                     progress = objective_close(self._progress(run), run)
@@ -1292,9 +1597,16 @@ class Dreaming:
                             ref = ('record:' if path.startswith('records/') else 'collaboration:' if path.startswith('collaboration/') else '') + Path(path).stem
                             if ref in current_inputs:
                                 progress['memory'][ref] = {**current_inputs[ref], 'status': 'processed'}
-                    if objective_outcome and objective_observe(progress)['objective_completion'] != 'reviewable-complete':
-                        _fail('pending_objective', 'Historical sources, memories or explicit gaps still need review')
+                    observed = objective_observe(progress)
+                    if objective_outcome and observed['objective_completion'] != 'reviewable-complete':
+                        named = ', '.join(f"{g.get('source_id', g.get('root'))}: {g['reason']}" for g in observed['gaps'][:4])
+                        _fail('pending_objective', 'Historical sources, memories or explicit gaps still need review'
+                              + (f' (unaccepted gaps: {named}; accept them with a note or keep the objective pending)' if named else ''))
                     run['objective_progress'] = save_objective(self.store, progress)
+            # Receipts were sealed at publication; the original sources stay the text owner.
+            for material in run['materials'].values():
+                for event in material['events']:
+                    event.pop('text', None)
             self._save(run)
             self._fault('run-closed', {'id': 'close'})
             if run.get('checkpoint'):
@@ -1305,7 +1617,8 @@ class Dreaming:
                     'pending_review': pending, 'unprocessed_events': len(missing), 'partial': bool(outstanding or basis_changed),
                     'review_objective': run.get('review_objective'), 'objective_completion': run['objective_completion'],
                     'unresolved_effects': len(outstanding),
-                    **({'objective_progress': objective_observe(progress)} if run.get('objective_progress') and run.get('checkpoint') else {})}
+                    **({'objective_progress': observed, 'outstanding_gaps': observed['gaps']}
+                       if run.get('objective_progress') and run.get('checkpoint') else {})}
 
     def changes(self, run_id, *, max_bytes=12000):
         """Readable bounded differences within the current objective and source grants."""

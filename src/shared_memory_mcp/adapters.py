@@ -2,6 +2,9 @@
 
 Hook context is append-only in both hosts. Each boundary requests a current
 bounded view; these adapters neither read transcripts nor capture memories.
+A root `startup` may additionally start the detached, store-configured session
+extraction after the hook output is written. Claude `SubagentStart` receives
+only a bounded worker caller identity, never a startup packet.
 """
 from __future__ import annotations
 
@@ -67,12 +70,45 @@ def handle_hook(store: Any, harness: str, event: Any, *, limit: int = 8,
     return output
 
 
+SUBAGENT_BYTES = 1024
+
+
+def handle_subagent(store: Any, event: Any, *, max_bytes: int = SUBAGENT_BYTES) -> dict[str, Any]:
+    """Bounded worker identity for a Claude Agent-tool subagent; the parent session is lineage only."""
+    if not isinstance(event, dict) or event.get("hook_event_name") != "SubagentStart":
+        raise AdapterInputError("Expected SubagentStart")
+    cwd, parent = event.get("cwd"), event.get("session_id")
+    agent_id, agent_type = event.get("agent_id"), event.get("agent_type") or "subagent"
+    if not isinstance(cwd, str) or not cwd or not Path(cwd).is_absolute() or "\x00" in cwd:
+        raise AdapterInputError("Hook cwd must be an absolute path")
+    for value in (parent, agent_id, agent_type):
+        if not isinstance(value, str) or not value.strip() or len(value) > 128:
+            raise AdapterInputError("SubagentStart requires session_id, agent_id and a short agent_type")
+    caller = {"cwd": cwd, "harness": "claude", "session_id": agent_id, "actor": agent_type,
+              "role": "worker", "parent_session_id": parent}
+    try:
+        # Registry read only: never wait on the writer gate inside the host's hook timeout.
+        scope = store._resolve(caller)
+    except Exception as exc:
+        raise AdapterInputError("Core could not resolve the worker scope", getattr(exc, "code", "invalid_context")) from exc
+    identity = {"harness": "claude", "session_id": agent_id, "parent_session_id": parent, "role": "worker",
+                "actor": agent_type, "cwd": cwd, "project_id": scope["project_id"]}
+    text = ("Shared-memory worker caller: " + json.dumps(identity, ensure_ascii=False) +
+            "\nCall shared-memory `context` with this caller before relying on shared memory; "
+            "write under it, never under the parent session.")
+    output = {"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": text}}
+    if len(json.dumps(output, ensure_ascii=False).encode("utf-8")) > max_bytes:
+        raise AdapterInputError("Serialized worker identity exceeds its byte cap", "context_budget")
+    return output
+
+
 def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
-              stdout: TextIO | None = None, stderr: TextIO | None = None) -> int:
+              stdout: TextIO | None = None, stderr: TextIO | None = None, spawn: Any = None) -> int:
     """Emit host JSON; errors inject no memory and remain advisory to the host."""
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
+    startup = False
     try:
         raw = stdin.read(1_048_577)
         if len(raw) > 1_048_576:
@@ -81,7 +117,11 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
             event = json.loads(raw)
         except (json.JSONDecodeError, ValueError) as exc:
             raise AdapterInputError("Hook stdin must be a JSON event") from exc
-        output = handle_hook(store, harness, event)
+        if harness == "claude" and isinstance(event, dict) and event.get("hook_event_name") == "SubagentStart":
+            output = handle_subagent(store, event)
+        else:
+            startup = isinstance(event, dict) and event.get("hook_event_name") == "SessionStart" and event.get("source") == "startup"
+            output = handle_hook(store, harness, event)
     except Exception as exc:
         # Do not echo raw native input, transcript paths, credentials, or records.
         code = getattr(exc, "code", "adapter_error")
@@ -89,4 +129,15 @@ def hook_main(store: Any, harness: str, *, stdin: TextIO | None = None,
                           "error_type": type(exc).__name__}), file=stderr)
         output = {}
     print(json.dumps(output, ensure_ascii=False), file=stdout)
+    stdout.flush()
+    if startup and getattr(store, "root", None) is not None:
+        # After the output: extraction runs detached and can never delay or alter recall.
+        try:
+            if spawn is None:
+                from .extract import spawn
+            started = spawn(store)
+            if started.get("diagnostic"):
+                print(json.dumps({"shared_memory_extraction": "disabled", "diagnostic": started["diagnostic"]}), file=stderr)
+        except Exception as exc:
+            print(json.dumps({"shared_memory_extraction": "not_started", "error_type": type(exc).__name__}), file=stderr)
     return 0

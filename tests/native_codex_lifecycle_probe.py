@@ -217,12 +217,12 @@ tool_timeout_sec = 15
         def refresh(source):
             options['sentinel'] = marker+'_'+source
             source_ref = {'uri': (project/'fixture-owner.md').as_uri()}
-            payload = {'context': {'cwd': str(project), 'harness': 'codex', 'session_id': 'native-fixture-seed', 'actor': 'fixture'},
+            payload = {'caller': {'cwd': str(project), 'harness': 'codex', 'session_id': 'native-fixture-seed', 'actor': 'fixture'},
                 'id': seeded['id'], 'review': {'reason': 'Synthetic freshness check', 'evidence': [source_ref]},
                 'idempotency_key': 'native-lifecycle-'+source, 'details': {'summary': options['sentinel'],
                     'conditions': 'Synthetic fixture only; no scientific support.', 'extensions': {'narrative': {
                         'id': 'native.background', 'role': 'background', 'compact': options['sentinel']}}}}
-            changed = subprocess.run([CLI, '--root', str(store), 'call', '--tool', 'curate'], cwd=root, env=env,
+            changed = subprocess.run([CLI, '--root', str(store), 'call', '--tool', 'annotate'], cwd=root, env=env,
                 input=json.dumps(payload), capture_output=True, text=True, timeout=20)
             assert changed.returncode == 0, changed.stderr[:600]
             assert json.loads(changed.stdout).get('status') == 'ok', changed.stdout[:600]

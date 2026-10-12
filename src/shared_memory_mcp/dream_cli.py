@@ -6,6 +6,10 @@ import sys
 from .core import MemoryError, _decode
 from .dreaming import Dreaming, add_disposition, configure_policy
 
+RETIRED = ('Fixed-Run delegation and the dated-profile Dreaming gateway were retired; use the unified '
+           'shared-memory operations (`shared-memory serve` MCP or `shared-memory call --tool`): source_list, '
+           'dream_start, dream_status, dream_materials, dream_draft, dream_publish, dream_close, dream_takeover')
+
 
 def add_parser(commands):
     from .cli import _add_context
@@ -14,8 +18,9 @@ def add_parser(commands):
     config = actions.add_parser('configure', help='Read an explicitly authorized bounded policy JSON from stdin')
     config.add_argument('--expected-revision', default='absent')
     actions.add_parser('capabilities')
-    gateway = actions.add_parser('gateway', help='Launcher-bound profile with explicit caller context on every MCP call')
-    gateway.add_argument('--profile', required=True)
+    # Retired entry kept only so old launchers receive the retired diagnostic instead of a usage error.
+    gateway = actions.add_parser('gateway', help='Retired: use the unified shared-memory operations')
+    gateway.add_argument('--profile')
     gateway.add_argument('--enable-publisher', action='store_true')
     for name in ('start', 'inspect', 'materials', 'freeze', 'diff', 'mark', 'takeover', 'publish',
                  'overview', 'close', 'issue', 'disposition', 'serve', 'catalog', 'audit', 'source-list', 'source-read'):
@@ -90,10 +95,8 @@ def handle(store, args):
     if action == 'capabilities':
         from .dream_transport import capabilities
         return capabilities()
-    if action == 'gateway':
-        from .dream_gateway import make_dream_gateway
-        make_dream_gateway(store, args.profile, publisher=args.enable_publisher).run(transport='stdio')
-        return None
+    if action == 'gateway' or action == 'serve' and (args.run_id is not None or args.generation is not None):
+        raise MemoryError('retired', RETIRED)  # Checked before any policy read, Run or registration.
     caller = {key: getattr(args, key) for key in ('cwd', 'harness', 'session_id', 'actor', 'task_id', 'project_id')
               if getattr(args, key, None) is not None}
     # A CLI process is an operator boundary. Model-facing MCP tools cannot pick
@@ -159,8 +162,6 @@ def handle(store, args):
         return add_disposition(store, caller, target=target, **payload)
     if action == 'serve':
         from .dream_transport import make_dream_server
-        if (args.run_id is None) != (args.generation is None):
-            raise MemoryError('invalid_input', 'Fixed-Run serving requires both run-id and generation')
-        make_dream_server(engine, args.run_id, args.generation).run(transport='stdio')
+        make_dream_server(engine).run(transport='stdio')
         return None
     raise MemoryError('invalid_input', 'Unknown Dream command')

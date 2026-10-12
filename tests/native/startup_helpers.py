@@ -21,24 +21,24 @@ async def seed(options):
     async with stdio_client(params) as (reader,writer):
         async with ClientSession(reader,writer) as session:
             await session.initialize()
-            proposed = unpack(await session.call_tool('create',{'context':context,
+            proposed = unpack(await session.call_tool('capture',{'caller':context,
                 'record':{'kind':'invariant','title':'Synthetic startup sentinel','body':options['sentinel'],
                           'scope':'project','sources':[source]},'idempotency_key':'native-propose'}))
-            identifier = proposed['record']['id']
-            unpack(await session.call_tool('approve',{'context':context,'id':identifier,
+            identifier = (proposed.get('item') or proposed.get('record') or proposed)['id']
+            unpack(await session.call_tool('approve',{'caller':context,'id':identifier,
                 'review':{'reason':'Synthetic test fixture only','evidence':[source]},'idempotency_key':'native-promote'}))
-            unpack(await session.call_tool('curate', {'context': context, 'id': identifier,
+            unpack(await session.call_tool('annotate', {'caller': context, 'id': identifier,
                 'review': {'reason': 'Reviewed synthetic compact background', 'evidence': [source]},
                 'idempotency_key': 'native-background', 'details': {
                     'summary': options['sentinel'], 'conditions': 'Synthetic fixture only; no scientific support.',
                     'extensions': {'narrative': {'id': 'native.background', 'role': 'background', 'compact': options['sentinel']}}}}))
             routing = Path(options['root']) / 'routing'
             routing.mkdir(exist_ok=True)
-            (routing / (proposed['record']['project_id'] + '.json')).write_text(json.dumps({
+            (routing / ((proposed.get('item') or proposed.get('record') or proposed)['project_id'] + '.json')).write_text(json.dumps({
                 'version': 1, 'description': 'Synthetic navigation fixture, not scientific evidence.',
                 'topics': [{'id': 'fixture', 'title': options['sentinel'], 'when': 'During this isolated test.',
                             'sources': [source], 'memory_ids': [identifier]}]}))
-            nav = unpack(await session.call_tool('context',{'context':context}))
+            nav = unpack(await session.call_tool('context',{'caller':context}))
             assert nav['packet_version'] == 1 and not nav['records_not_loaded']
             assert any(item['id'] == identifier for item in nav['items']) and options['sentinel'] in nav['text']
             assert 'Synthetic fixture only' in nav['text']

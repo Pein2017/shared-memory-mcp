@@ -1,5 +1,7 @@
-/** Ephemeral shared context only. No native-store writes or transcript loading. */
-import { execFile } from "node:child_process";
+/** Ephemeral shared context only. No native-store writes or transcript loading.
+ * A root startup may start the store-configured detached extraction through the CLI;
+ * the CLI owns the enabled check and the extension never waits for it. */
+import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -9,7 +11,7 @@ const onboardingType = "shared-memory-onboarding";
 const ownedTypes = new Set([bootstrapType, taskType, onboardingType]);
 const byteLimit = 8000;
 const maxChars = 6000;
-const operations = new Set(["context", "create", "capture", "approve", "update", "delete", "curate", "draft_publish"]);
+const operations = new Set(["context", "capture", "approve", "supersede", "withdraw", "annotate", "dream_publish"]);
 const toolPattern = /^(?:mcp__(?:shared_memory|shared-memory)__|(?:shared_memory|shared-memory)_)([a-z_]+)$/;
 const servers = new Set(["shared-memory", "shared_memory"]);
 type ToolIdentity = { toolName: string; details?: unknown };
@@ -41,6 +43,14 @@ type OwnedPart = { content: string; timestamp: number; customType: string };
 
 function diagnostic(code: string): void {
   process.stderr.write(`${JSON.stringify({ shared_memory: "empty", diagnostic: code })}\n`);
+}
+
+function startExtraction(command: string, root: string): void {
+  try {
+    const child = spawn(command, ["--root", root, "extract", "--spawn"], { detached: true, stdio: "ignore" });
+    child.on("error", () => diagnostic("extraction_not_started"));
+    child.unref();
+  } catch { diagnostic("extraction_not_started"); }
 }
 
 function runContext(command: string, args: string[]): Promise<Packet> {
@@ -175,7 +185,14 @@ export function createSharedMemoryExtension(options: SharedMemoryOptions = {}) {
         if (current === generation) { parts = []; diagnostic(error instanceof Error ? error.message : "context_failed"); }
       }
     }
-    pi.on("session_start", async (_event, ctx) => { recoverBinding = true; await refresh(ctx); });
+    pi.on("session_start", async (event, ctx) => {
+      recoverBinding = true;
+      await refresh(ctx);
+      // Root startups only: Pi Web children and forks carry a parentSession header.
+      const root = options.root ?? process.env.SHARED_MEMORY_ROOT;
+      if (event.reason === "startup" && !ctx.sessionManager.getHeader()?.parentSession && root && isAbsolute(root))
+        startExtraction(options.cli ?? process.env.SHARED_MEMORY_CLI ?? "shared-memory", root);
+    });
     pi.on("session_compact", async (_event, ctx) => { recoverBinding = true; await refresh(ctx); });
     pi.on("tool_result", async (event, ctx) => {
       const operation = operationIdentity(event);

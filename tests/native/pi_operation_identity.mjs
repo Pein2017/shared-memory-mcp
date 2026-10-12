@@ -74,7 +74,7 @@ try {
   const tool = session.agent.state.tools.find(t => t.name === name);
   assert.ok(tool, names.join(','));
   const history = JSON.stringify(manager.getEntries());
-  const first = await call(tool, {context:caller(), query:'airport', task_mode:'research'});
+  const first = await call(tool, {caller:caller(), query:'airport', task_mode:'research'});
   console.log(JSON.stringify({stage:'actual-context', tool:name, details:first.details,
     packet:JSON.parse(first.content[0].text)}));
   let projected = await session.extensionRunner.emitContext([user, first]);
@@ -82,12 +82,12 @@ try {
   const grown = await session.extensionRunner.emitContext([...projected, {role:'user', content:'Continue', timestamp:3}]);
   assert.deepEqual(convertToLlm(grown).slice(0, convertToLlm(projected).length), convertToLlm(projected));
   const background = owned(projected)[0];
-  const second = await call(tool, {context:caller(), query:'airport', task_mode:'general'});
+  const second = await call(tool, {caller:caller(), query:'airport', task_mode:'general'});
   projected = await session.extensionRunner.emitContext([user, first, second]);
   assertPacket(projected, 'general');
   assert.deepEqual(owned(projected)[0], background);
   const packet = JSON.parse(second.content[0].text);
-  const unchanged = await call(tool, {context:caller(), query:'airport', task_mode:'general', previous_revision:packet.packet_revision});
+  const unchanged = await call(tool, {caller:caller(), query:'airport', task_mode:'general', previous_revision:packet.packet_revision});
   assert.equal(JSON.parse(unchanged.content[0].text).unchanged, true);
   assert.deepEqual(owned(await session.extensionRunner.emitContext([user, first, second, unchanged])), owned(projected));
 
@@ -95,7 +95,7 @@ try {
   if (o.transport === 'installed') {
     const gateway = session.agent.state.tools.find(t => t.name === 'mcp');
     assert.ok(gateway);
-    const gatewayMessage = await call(gateway, {server:'shared-memory', tool:'context', args:{context:caller(), query:'airport', task_mode:'research'}});
+    const gatewayMessage = await call(gateway, {server:'shared-memory', tool:'context', args:{caller:caller(), query:'airport', task_mode:'research'}});
     assert.equal(gatewayMessage.details.server, 'shared-memory');
     assert.equal(gatewayMessage.details.tool, 'context');
     console.log(JSON.stringify({stage:'actual-gateway', details:gatewayMessage.details,
@@ -110,12 +110,12 @@ try {
   await session.extensionRunner.emit({type:'session_compact', compactionEntry:{}, fromExtension:false});
   assertPacket(await session.extensionRunner.emitContext([user]), 'general');
 
-  // Relevant create and capture calls refresh an already bound task packet.
-  for (const op of ['create', 'capture']) {
-    const mutation = session.agent.state.tools.find(t => t.name === (o.transport === 'installed' ? `shared-memory_${op}` : `mcp__shared_memory__${op}`));
+  // Relevant candidate and reviewed capture calls refresh an already bound task packet.
+  for (const op of ['candidate', 'capture']) {
+    const mutation = session.agent.state.tools.find(t => t.name === (o.transport === 'installed' ? 'shared-memory_capture' : 'mcp__shared_memory__capture'));
     assert.ok(mutation);
     const rec = {kind:'observation', title:`airport ${op}`, body:`REFRESH_${op}: airport fixture only.`, scope:'project', sources:[{uri:pathToFileURL(path.join(o.project,'owner.md')).href}]};
-    const args = {context:caller(), record:rec, idempotency_key:`fixture-${op}`,
+    const args = {caller:caller(), record:rec, idempotency_key:`fixture-${op}`,
       ...(op === 'capture' ? {review:{reason:'Synthetic review only', evidence:rec.sources}} : {})};
     const beforeRefresh = contextCalls();
     await call(mutation, args);

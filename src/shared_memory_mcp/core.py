@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -24,6 +24,22 @@ MAX_RECORDS = 10000
 MAX_RECORD_BYTES = 1024 * 1024
 SEARCH_RESPONSE_BYTES = 12000
 SEARCH_BODY_BYTES = 1024
+READ_WAIT_SECONDS = 5  # read paths wait this long for the writer gate, then report writer_busy
+TASK_EXPIRY = timedelta(days=14)
+STALE_AFTER = timedelta(days=7)
+LINEAGE_FIELDS = ('role', 'model', 'parent_session_id', 'task_id')
+ASSURANCE_ORDER = ('dreaming-reviewed', 'cross-session-reviewed', 'self-reviewed', 'candidate', 'model-extracted')
+# Named secret classes for write notices; dream_sources.SECRET remains the reader-side owner.
+SECRET_CLASSES = (
+    ('private-key', re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----')),
+    ('openai-key', re.compile(r'\bsk-[A-Za-z0-9_-]{20,}')),
+    ('aws-access-key', re.compile(r'\bAKIA[A-Z0-9]{16}\b')),
+    ('github-token', re.compile(r'\b(?:ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})')),
+    ('slack-token', re.compile(r'\bxox[abp]-[A-Za-z0-9-]{10,}')),
+    ('google-api-key', re.compile(r'\bAIza[0-9A-Za-z_-]{35}')),
+    ('jwt', re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}')),
+    ('bearer-token', re.compile(r'\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*')),
+)
 WORKFLOW_REMINDER = (
     'Shared-memory reminder: Use the shared-memory skill for nontrivial registered-project coding/research. '
     'Startup supplies dated background; select research/general and retrieve relevant task evidence. '
@@ -131,6 +147,64 @@ def _within(path, root):
     return path == root or root in path.parents
 
 
+def _private_mkdir(path, root):
+    """Create missing store directories one level at a time with mode 0o700."""
+    if not root.exists():
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.mkdir(mode=0o700, exist_ok=True)
+    missing = []
+    while path != root and not path.exists():
+        missing.append(path)
+        path = path.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700, exist_ok=True)
+
+
+def write_notices(texts, sources):
+    """Warn, never reject: secret-like text and volatile file sources (records stay byte-identical)."""
+    from .dream_sources import SECRET
+    notices, text = [], '\n'.join(texts)
+    for name, pattern in SECRET_CLASSES:
+        if pattern.search(text):
+            notices.append({'code': 'secret_pattern', 'pattern': name})
+    if not notices and SECRET.search(text):
+        notices.append({'code': 'secret_pattern', 'pattern': 'secret'})
+    for source in sources:
+        parsed = urlparse(source.get('uri', ''))
+        path = Path(parsed.path)
+        if parsed.scheme == 'file' and (path.parts[1:2] == ('tmp',) or path.parts[1:3] == ('var', 'tmp') or
+                                        any(part.startswith('.tmp') for part in path.parts)):
+            notices.append({'code': 'volatile_source', 'uri': source['uri'],
+                            'message': 'Temporary paths disappear; cite a durable owner when one exists.'})
+    return notices
+
+
+def lifecycle_overlay(r, now=None):
+    """Read-time effective status (adds `stale`) and review assurance; never written back."""
+    now = now or datetime.now(timezone.utc)
+    status = r['effective_status']
+    if status == 'candidate':
+        touched = max([_utc(r['created_at'])] + [_utc(e['at']) for e in r.get('curation_audit', [])])
+        if now - touched >= STALE_AFTER:
+            status = 'stale'
+    review = r.get('review')
+    if review:
+        if r.get('promotion', {}).get('key', '').startswith('dream:'):
+            assurance = 'dreaming-reviewed'
+        elif review['reviewer']['session_id'] == r['provenance']['session_id']:
+            assurance = 'self-reviewed'
+        else:
+            assurance = 'cross-session-reviewed'
+    else:
+        assurance = 'model-extracted' if r.get('details', {}).get('assurance') == 'model-extracted' else 'candidate'
+    return {'effective_status': status, 'assurance': assurance}
+
+
+def assurance_rank(r):
+    value = r.get('assurance')
+    return ASSURANCE_ORDER.index(value) if value in ASSURANCE_ORDER else len(ASSURANCE_ORDER)
+
+
 class MemoryStore:
     collection = 'project'
 
@@ -153,22 +227,28 @@ class MemoryStore:
         self.root = Path(root).expanduser().resolve()
 
     @contextmanager
-    def _gate(self, initializing=False):
+    def _gate(self, initializing=False, *, read=False):
         if not initializing and not (self.root / 'registry.json').is_file():
             _fail('uninitialized', 'Memory root has no explicit project registry')
         if initializing:
-            self.root.mkdir(parents=True, exist_ok=True)
+            _private_mkdir(self.root, self.root)
         if (self.root / '.writer-gate.sqlite3').is_symlink():
             _fail('unsafe_path','Writer gate may not be a symlink')
-        with sqlite3.connect(self.root / '.writer-gate.sqlite3', timeout=30) as connection:
-            connection.execute('PRAGMA busy_timeout=30000')
-            connection.execute('BEGIN IMMEDIATE')
+        wait = READ_WAIT_SECONDS if read else 30
+        with sqlite3.connect(self.root / '.writer-gate.sqlite3', timeout=wait) as connection:
+            connection.execute(f'PRAGMA busy_timeout={int(wait * 1000)}')
+            try:
+                connection.execute('BEGIN IMMEDIATE')
+            except sqlite3.OperationalError as exc:
+                if not read or 'locked' not in str(exc):
+                    raise
+                _fail('writer_busy', f'A writer held the gate longer than {wait} s; retry this read shortly')
             yield
 
     def _publish(self, target, data):
         if not _within(target.parent.resolve(),self.root):
             _fail('unsafe_path','Publication target escapes canonical root')
-        target.parent.mkdir(parents=True, exist_ok=True)
+        _private_mkdir(target.parent, self.root)
         fd, name = tempfile.mkstemp(prefix='.publish-', dir=target.parent)
         try:
             with os.fdopen(fd, 'wb') as stream:
@@ -249,7 +329,7 @@ class MemoryStore:
             raise
 
     def _resolve_scope(self, context):
-        _keys(context, {'cwd','harness','session_id','actor'}, {'cwd','harness','session_id','actor','task_id','project_id'}, 'context')
+        _keys(context, {'cwd','harness','session_id','actor'}, {'cwd','harness','session_id','actor','task_id','project_id','role','model','parent_session_id'}, 'context')
         if not isinstance(context['cwd'],str) or not Path(context['cwd']).is_absolute():
             _fail('invalid_input','context.cwd must be absolute')
         cwd = Path(context['cwd']).resolve()
@@ -257,9 +337,12 @@ class MemoryStore:
             _fail('unmapped_scope','context.cwd must exist')
         if not isinstance(context['harness'],str) or context['harness'] not in HARNESSES:
             _fail('invalid_input','Unknown harness')
-        for name in ('session_id','actor','task_id','project_id'):
+        for name in ('session_id','actor','task_id','project_id','role','model','parent_session_id'):
             if name in context:
                 _nonempty(context[name],name)
+        # Declared lineage is provenance only; it never enters the resolved scope or grants authority.
+        if context.get('role', 'worker') not in ('lead','worker') or any(len(context.get(k,'')) > 256 for k in LINEAGE_FIELDS):
+            _fail('invalid_input','context.role must be lead or worker; lineage fields are short strings')
         registry = self._registry()
         git_root, common = _git_info(cwd)
         explicit = [(len(Path(p).parts),entry,p) for entry in registry['projects'] for p in entry['roots'] if _within(cwd,Path(p))]
@@ -300,6 +383,11 @@ class MemoryStore:
         from .onboarding import discovery
         with self._gate():
             return discovery(self, cwd, project_id)
+
+    def _provenance(self, context, scope):
+        provenance = {key:context[key] for key in ('cwd','harness','session_id','actor',*LINEAGE_FIELDS) if key in context}
+        provenance['cwd'] = scope['cwd']
+        return provenance
 
     def _admit(self, record):
         if record['kind'] == 'handoff':
@@ -397,11 +485,12 @@ class MemoryStore:
             raise ValueError('Identity or status mismatch')
         self._record_input({name:value for name,value in {**r,'body':body}.items() if name in {'kind','title','body','scope','sources','expires_at','episode'}})
         _utc(r['created_at'])
-        _keys(r['provenance'],{'harness','session_id','actor','cwd'}, {'harness','session_id','actor','cwd','git'},'provenance')
+        _keys(r['provenance'],{'harness','session_id','actor','cwd'}, {'harness','session_id','actor','cwd','git',*LINEAGE_FIELDS},'provenance')
         if r['provenance']['harness'] not in HARNESSES or not Path(r['provenance']['cwd']).is_absolute():
             raise ValueError('Invalid provenance')
-        for name in ('actor','session_id'):
-            _nonempty(r['provenance'][name],name)
+        for name in ('actor','session_id',*LINEAGE_FIELDS):
+            if name in r['provenance'] or name in ('actor','session_id'):
+                _nonempty(r['provenance'][name],name)
         if 'git' in r['provenance']:
             locator = r['provenance']['git']
             _keys(locator,{'commit','branch'},{'commit','branch'},'Git provenance')
@@ -495,8 +584,9 @@ class MemoryStore:
             if prior:
                 return self._result(prior,records,True)
             self._admit(record)
-            r = {**record,'version':1,'id':uuid.uuid4().hex,'project_id':scope['project_id'],'status':'candidate','created_at':_now(),'provenance':{key:context[key] for key in ('cwd','harness','session_id','actor')},'proposal':{'key':idempotency_key,'digest':digest}}
-            r['provenance']['cwd'] = scope['cwd']
+            r = {**record,'version':1,'id':uuid.uuid4().hex,'project_id':scope['project_id'],'status':'candidate','created_at':_now(),'provenance':self._provenance(context,scope),'proposal':{'key':idempotency_key,'digest':digest}}
+            if r['scope'] == 'task' and 'expires_at' not in r:
+                r['expires_at'] = (_utc(r['created_at']) + TASK_EXPIRY).isoformat().replace('+00:00', 'Z')
             git_locator = _git_locator(scope['cwd'])
             if git_locator is not None:
                 r['provenance']['git'] = git_locator
@@ -516,7 +606,13 @@ class MemoryStore:
             _fail('invalid_input','supersede requires distinct predecessor IDs')
         return self._promote(context,id,sorted(old_ids),review,idempotency_key)
 
+    def _dream_key(self, key):
+        # `dream:` promotion keys mark Dreaming review (assurance); only the Dreaming writer issues them.
+        if isinstance(key, str) and key.startswith('dream:'):
+            _fail('invalid_input', 'idempotency_key prefix dream: is reserved for Dreaming publication')
+
     def _promote(self, context, id, old_ids, review, idempotency_key):
+        self._dream_key(idempotency_key)
         _keys(review,{'reason','evidence'},{'reason','evidence'},'review')
         _nonempty(review['reason'],'review.reason')
         _sources(review['evidence'])
@@ -558,6 +654,7 @@ class MemoryStore:
     def delete(self, context, id, review, idempotency_key):
         if not isinstance(id,str) or not RECORD_ID.fullmatch(id):
             _fail('invalid_input','delete requires a canonical target ID')
+        self._dream_key(idempotency_key)
         _keys(review,{'reason','evidence'},{'reason','evidence'},'review')
         _nonempty(review['reason'],'review.reason')
         _sources(review['evidence'])
@@ -575,13 +672,12 @@ class MemoryStore:
                 _fail('invalid_target','Withdrawal markers cannot be deleted')
             if target['effective_status'] == 'withdrawn':
                 _fail('already_withdrawn','Record is already withdrawn')
-            provenance = {key:context[key] for key in ('cwd','harness','session_id','actor')}
-            provenance['cwd'] = scope['cwd']
+            provenance = self._provenance(context, scope)
             marker = {key:target[key] for key in ('project_id','scope','worktree_id','task_id') if key in target}
             marker.update(version=1,id=uuid.uuid4().hex,kind='decision',title='Withdrawal: '+target['title'],
                           body=review['reason'],sources=review['evidence'],withdraws=id,status='active',
                           created_at=_now(),provenance=provenance,
-                          review={**review,'reviewer':dict(provenance),'reviewed_at':_now()},
+                          review={**review,'reviewer':{k:provenance[k] for k in ('cwd','harness','session_id','actor')},'reviewed_at':_now()},
                           promotion={'key':idempotency_key,'digest':digest})
             git_locator = _git_locator(scope['cwd'])
             if git_locator is not None:
@@ -604,11 +700,11 @@ class MemoryStore:
 
     def search(self, context, query, limit=20, include_inactive=False, *,
                domain=None, offset=0, include_shared=True, expected_revision=None,
-               task_mode=None, mode_restriction=None):
+               task_mode=None, mode_restriction=None, statuses=None, scopes=None):
         from .recall import search
         return search(self, context, query, limit, include_inactive, domain=domain,
                       offset=offset, include_shared=include_shared, expected_revision=expected_revision,
-                      task_mode=task_mode, mode_restriction=mode_restriction)
+                      task_mode=task_mode, mode_restriction=mode_restriction, statuses=statuses, scopes=scopes)
 
     def _search_full(self, context, query, limit=20, include_inactive=False):
         if not isinstance(limit,int) or isinstance(limit,bool) or not 1 <= limit <= 100:
@@ -668,4 +764,6 @@ class MemoryStore:
             for entry in registry['projects']:
                 load_routing(self, entry['id'])
             load_sharing(self)
-            return {'status':'ok','root':str(self.root),'projects':counts,'writer_gate':'SQLite BEGIN IMMEDIATE','canonical':'fenced JSON + Markdown','scan_bound':MAX_RECORDS}
+            from .maintenance import permission_report
+            return {'status':'ok','root':str(self.root),'projects':counts,'writer_gate':'SQLite BEGIN IMMEDIATE','canonical':'fenced JSON + Markdown','scan_bound':MAX_RECORDS,
+                    'permissions':permission_report(self)}

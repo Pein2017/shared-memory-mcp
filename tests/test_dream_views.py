@@ -269,7 +269,7 @@ def test_inherited_access_revocation_is_a_view_policy_dependency(tmp_path, memor
         assert engine.overview('research', scenario='research')['text'] == current['text']
     revoked = deepcopy(inherited)
     revoked['profiles']['fixture']['read_access'] = 'granted'
-    assert not dream_views._policy_matches(document, revoked, revoked['profiles']['fixture'])
+    assert dream_views._read_policy_revision(revoked, revoked['profiles']['fixture'], document) != document['read_policy_revision']
     configure_policy(store, revoked, expected_revision=_digest(inherited))
     for historical in [None, current['revision']]:
         denied = engine.overview('research', scenario='research', historical=historical)

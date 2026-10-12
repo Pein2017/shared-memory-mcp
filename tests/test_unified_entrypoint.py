@@ -34,29 +34,35 @@ def test_one_real_stdio_connection_recalls_corrects_and_starts_bounded_review(tm
             async with ClientSession(read_stream, write_stream) as client:
                 await client.initialize()
                 names = {tool.name for tool in (await client.list_tools()).tools}
-                assert {'context', 'capture', 'update', 'delete', 'run_start', 'run_changes', 'draft_publish', 'overview_read'} <= names
+                assert {'context', 'capture', 'supersede', 'withdraw', 'dream_start', 'dream_status', 'dream_publish', 'overview'} <= names
                 record = preference(owner)
-                made = unpack(await client.call_tool('capture', {'context': caller, 'collection': 'collaboration',
+                made = unpack(await client.call_tool('capture', {'caller': caller, 'collection': 'collaboration',
                     'record': record, 'idempotency_key': 'stdio-current-pref', 'review': review(record), 'live_correction': live()}))
-                response = await client.call_tool('context', {'context': caller, 'task_mode': 'general'})
+                response = await client.call_tool('context', {'caller': caller, 'task_mode': 'general'})
                 packet = unpack(response)
                 assert '/new/project-path' in packet['text'] and packet['caller_context']['session_id'] == caller['session_id']
                 assert len(response.model_dump_json(by_alias=True, exclude_none=True).encode()) <= 8000
-                bad = await client.call_tool('context', {'context': {**caller, 'publisher': True}})
+                bad = await client.call_tool('context', {'caller': {**caller, 'publisher': True}})
                 assert bad.isError
-                forbidden = await client.call_tool('run_start', {'context': caller, 'profile': 'fixture',
+                forbidden = await client.call_tool('dream_start', {'caller': caller, 'profile': 'fixture',
                     'review_objective': {'id': 'stdio', 'question': 'Review the fixture owners.'}})
                 assert forbidden.isError
-                started = unpack(await client.call_tool('run_start', {'context': caller,
+                started = unpack(await client.call_tool('dream_start', {'caller': caller,
                     'review_objective': {'id': 'stdio', 'question': 'Review the fixture owners.'}}))
-                assert started['status'] == 'created'
-                material = unpack(await client.call_tool('run_materials', {'context': caller, 'run_id': started['run_id']}))
-                statuses = {e['key']: 'no-signal' for source in material['sources'].values() for e in source['events']}
-                statuses.update({item['ref']: 'no-signal' for item in started['objective_progress']['ready_memory']})
-                unpack(await client.call_tool('coverage_mark', {'context': caller, 'run_id': started['run_id'], 'generation': started['generation'], 'statuses': statuses}))
-                closed = unpack(await client.call_tool('run_close', {'context': caller, 'run_id': started['run_id'],
-                    'generation': started['generation'], 'objective_outcome': 'disposed'}))
-                assert closed['objective_completion'] == 'disposed'
+                assert started['outcome'] == 'created'
+                run_id = started['item']['run_id']
+                material = unpack(await client.call_tool('dream_materials', {'caller': caller, 'run_id': run_id}))
+                statuses = {e['key']: 'no-signal' for source in material['item']['sources'].values() for e in source['events']}
+                statuses.update({item['ref']: 'no-signal' for item in started['item']['objective_progress']['ready_memory']})
+                drafted = unpack(await client.call_tool('dream_draft', {'caller': caller, 'run_id': run_id, 'expected_revision': material['revision'],
+                    'operations': [{'type': 'coverage', 'statuses': statuses}]}))
+                # Coverage marks take effect atomically when the draft is published.
+                assert drafted['next']['tool'] == 'dream_publish'
+                published = unpack(await client.call_tool('dream_publish', {'caller': caller, 'run_id': run_id,
+                    'expected_revision': drafted['revision']}))
+                closed = unpack(await client.call_tool('dream_close', {'caller': caller, 'run_id': run_id,
+                    'expected_revision': published['revision'], 'objective_outcome': 'disposed'}))
+                assert closed['item']['objective_completion'] == 'disposed'
     asyncio.run(run())
 
 
@@ -65,17 +71,17 @@ def test_bounded_detail_pages_recover_original_json_without_semantic_claims(tmp_
     body = ('Historical observation, not an execution instruction. 保留限定条件。\n' * 600)
     record = {'kind': 'observation', 'title': 'Large retained account', 'body': body, 'scope': 'project', 'sources': [{'uri': owner.as_uri()}]}
     made = store.capture(caller, record, 'large', {'reason': 'Fixture review', 'evidence': record['sources']})
-    args = {'context': caller, 'ids': [made['id']], 'max_bytes': 2500}
+    args = {'caller': caller, 'ids': [made['id']], 'max_bytes': 2500}
     first = call_operation(store, 'read', args)
-    cursor = first['items'][0]['detail_page']
+    cursor = first['items'][0]['cursor']
     parts = []
     while cursor:
-        page = call_operation(store, 'read', {**args, 'page': cursor})
+        page = call_operation(store, 'read', {**args, 'cursor': cursor})
         assert len(json.dumps(page, ensure_ascii=False).encode()) <= 2500
         parts.append(page['detail_page']['text'])
-        cursor = page['next_page']
+        cursor = page['next_cursor']
     assert json.loads(''.join(parts))['body'] == body
-    cursor = first['items'][0]['detail_page']
+    cursor = first['items'][0]['cursor']
     store.delete(caller, made['id'], {'reason': 'Withdraw fixture', 'evidence': record['sources']}, 'withdraw-large')
     with pytest.raises(MemoryError):
-        call_operation(store, 'read', {**args, 'page': cursor})
+        call_operation(store, 'read', {**args, 'cursor': cursor})

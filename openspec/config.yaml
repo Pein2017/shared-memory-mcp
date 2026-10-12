@@ -15,7 +15,9 @@ context: |
   No daemon, automatic transcript extraction, scheduler, background model calls,
   mandatory embeddings or new memory Git repository is required.
   openspec/specs is the current reconciled implemented behavior contract after
-  the 2026-10-09 task-aware successor archive. No OpenSpec change is active.
+  the 2026-10-12 archive of improve-capture-and-dreaming-closure. The active
+  change evolve-shared-memory-v03 owns the v0.3 interface, Dreaming closure,
+  lifecycle governance and bounded session extraction.
   Historical deltas and model-specific qualification receipts are evidence,
   not new execution grants; first historical batch 8.2 was withdrawn.
   The target provides one MCP entrypoint for ordinary Agent maintenance and

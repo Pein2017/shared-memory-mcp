@@ -26,7 +26,7 @@ CLI = '/data/CoordExp/.shared-memory/.venv/bin/shared-memory'
 RUNTIME = str(Path(CLI).with_name('python'))
 PI_SDK = os.environ.get('PI_SDK_ROOT', str((PACKAGE.parent/'pi-web/node_modules/@earendil-works/pi-coding-agent').resolve()))
 HELPER = PACKAGE / 'tests/native/startup_helpers.py'
-TOOLS = ['context','search','read','create','approve','update','delete','capture','curate']
+TOOLS = ['context','search','read','capture','approve','supersede','withdraw','annotate']
 CLAUDE_MODEL = 'claude-haiku-4-5-20251001'
 
 

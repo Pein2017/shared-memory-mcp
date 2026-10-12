@@ -30,7 +30,7 @@ SECRET = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----|\b(?:sk-[A-Za-z0-9_-]{2
 
 def validate_source(source, *, allow_instructions=False):
     _keys(source, {'id', 'path', 'format', 'schema'},
-          {'id', 'path', 'format', 'schema', 'native_version', 'attestations',
+          {'id', 'path', 'format', 'schema', 'native_version', 'native_versions', 'attestations',
            'leaf_id', 'derived', 'lineage'}, 'dream source')
     if not isinstance(source['id'], str) or not SAFE_ID.fullmatch(source['id']):
         _fail('invalid_input', 'Source ID must be a bounded identifier')
@@ -41,7 +41,13 @@ def validate_source(source, *, allow_instructions=False):
     p = Path(source['path'])
     if not p.is_absolute() or '..' in p.parts or p.name == '.env' or (not allow_instructions and p.name in {'AGENTS.md', 'SKILL.md'}):
         _fail('unsafe_source', 'Source must be an explicit absolute non-instruction file')
-    if source['format'] == 'claude' or 'native_version' in source:
+    if 'native_versions' in source:
+        versions = source['native_versions']
+        if not isinstance(versions, list) or not 1 <= len(versions) <= 16:
+            _fail('invalid_input', 'native_versions must be a bounded nonempty list')
+        for version in versions:
+            _nonempty(version, 'source.native_versions')
+    if 'native_version' in source or source['format'] == 'claude' and 'native_versions' not in source:
         _nonempty(source.get('native_version'), 'source.native_version')
     if type(source.get('derived', False)) is not bool:
         _fail('invalid_input', 'derived must be boolean')
@@ -295,15 +301,17 @@ def _public(source, raw, line, state, *, raw_digest=None):
                 known = (all(isinstance(payload.get(k), dict) for k in ('usage', 'turn_token_usage', 'thread_token_usage')) and
                          all(isinstance(payload.get(k), str) for k in ('thread_id', 'turn_id', 'session_id', 'root_turn_id', 'response_id')))
             return None, None if known else 'unknown_event_schema'
-        if kind in {'event_msg', 'turn_context'}:
+        if kind in {'event_msg', 'turn_context', 'inter_agent_communication_metadata'}:
             # event_msg duplicates public response_item text; it is not extra evidence.
             return None, None
         if kind != 'response_item':
             return None, 'unknown_event_schema'
         payload = raw.get('payload', {})
         if payload.get('type') != 'message':
+            # Tool, reasoning and inter-agent items carry no public message text.
             return None, None if payload.get('type') in {'reasoning', 'function_call', 'function_call_output',
-                                                       'custom_tool_call', 'custom_tool_call_output'} else 'unknown_event_schema'
+                                                       'custom_tool_call', 'custom_tool_call_output', 'agent_message',
+                                                       'tool_search_call', 'tool_search_output'} else 'unknown_event_schema'
         role = payload.get('role')
         content = payload.get('content')
         event_id, parent = raw.get('id', f'line:{line}'), None
@@ -338,11 +346,28 @@ def _public(source, raw, line, state, *, raw_digest=None):
         if not isinstance(event_id, str):
             return None, 'missing_event_identity'
     else:
-        if native is None or raw.get('version') != native:
-            return None, 'unknown_native_version'
-        if kind in {'summary', 'compact_boundary'} or raw.get('isCompactSummary'):
+        # Payload-free ancestry for every record, so a selected leaf can walk through
+        # skipped attachments, tool results or thinking-only turns (page-local).
+        if isinstance(raw.get('uuid'), str) and 'parentUuid' in raw:
+            links = state.setdefault('claude_links', {})
+            parent_link = raw['parentUuid'] if isinstance(raw['parentUuid'], str) else None
+            if links.get(raw['uuid'], parent_link) != parent_link:
+                state.setdefault('conflicting_ids', {})[raw['uuid']] = True
+            elif len(links) >= MAX_PI_GRAPH_NODES:
+                _fail('source_limit', f'Claude ancestry exceeds fixed limit of {MAX_PI_GRAPH_NODES} identities')
+            links[raw['uuid']] = parent_link
+        if (kind in {'summary', 'compact_boundary'} or raw.get('isCompactSummary') or
+                kind == 'system' and raw.get('subtype') == 'compact_boundary'):
             return None, 'compaction_originals_not_proven'
-        if kind in {'system', 'progress', 'file-history-snapshot', 'queue-operation'}:
+        # Native navigation metadata may have no producer version; its payload stays private.
+        if kind in {'file-history-snapshot', 'file-history-delta', 'queue-operation',
+                    'ai-title', 'atis-latch', 'agent-name', 'bridge-session', 'cost-state',
+                    'custom-title', 'last-prompt', 'mode', 'permission-mode',
+                    'attachment', 'relocated', 'continued-in'}:
+            return None, None
+        if raw.get('version') not in {native, *source.get('native_versions', [])} - {None}:
+            return None, 'unknown_native_version'
+        if kind in {'system', 'progress'}:
             return None, None
         if kind not in {'user', 'assistant'} or not isinstance(raw.get('message'), dict):
             return None, 'unknown_event_schema'
@@ -358,6 +383,7 @@ def _public(source, raw, line, state, *, raw_digest=None):
             return None, 'mixed_session_identity'
         state.update(session=session, valid=True)
         delegated = bool(raw.get('isSidechain') or raw.get('isMeta'))
+        agent_id = raw.get('agentId') if isinstance(raw.get('agentId'), str) else None
     if payload.get('channel') in {'analysis', 'summary'} or raw.get('channel') in {'analysis', 'summary'}:
         return None, None
     if role not in {'user', 'assistant'}:
@@ -376,7 +402,8 @@ def _public(source, raw, line, state, *, raw_digest=None):
             'session_parent': state.get('parent'), 'role': role, 'text': text,
             'timestamp': raw.get('timestamp', payload.get('timestamp')),
             'delegated': delegated, 'branch': 'unspecified',
-            **({'native_version': state['native_version']} if fmt == 'codex' else {})}, None
+            **({'native_version': state['native_version']} if fmt == 'codex' else {}),
+            **({'agent_id': agent_id} if fmt == 'claude' and agent_id else {})}, None
 
 
 def check_snapshot(source, version, *, verification=None):
@@ -567,6 +594,7 @@ def read_source(source, *, max_bytes=262144, max_events=128, cursor=None, refres
     if not complete:
         gaps.append({'reason': 'bounded_partial', 'next_offset': position})
     events, excluded = _branches(source, events, gaps, state, excluded)
+    state.pop('claude_links', None)
     version = {'identity': identity, 'cutoff': cutoff, 'consumed': position,
                'prefix_sha256': digest.hexdigest(), 'schema': source['schema']}
     if source['format'] == 'pi':
@@ -620,7 +648,7 @@ def _branches(source, events, gaps, state, excluded):
     elif source['format'] == 'claude':
         leaf = source.get('leaf_id')
         if leaf:
-            parents = {x['event_id']: x['parent'] for x in events}
+            parents = {**state.get('claude_links', {}), **{x['event_id']: x['parent'] for x in events}}
             selected, current = set(), leaf
             conflicts = state.get('conflicting_ids', {})
             while (isinstance(current, str) and current in parents and

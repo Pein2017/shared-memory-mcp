@@ -166,7 +166,9 @@ def live_review(context, scope, record, basis, *, reviewed_at):
         _fail('sensitive_content', 'The correction excerpt contains a recognized secret')
     locator = basis['original_locator']
     if locator is None:
-        _nonempty(basis['history_gap'], 'missing native-history limitation')
+        if not isinstance(basis['history_gap'], str) or not basis['history_gap'].strip():
+            from .curation import LOCATOR_HINT
+            _fail('invalid_input', 'live_correction without original_locator needs a nonempty history_gap. ' + LOCATOR_HINT)
     else:
         _sources([locator])
     if not isinstance(basis['history_gap'], str) or len(basis['history_gap']) > 1024:

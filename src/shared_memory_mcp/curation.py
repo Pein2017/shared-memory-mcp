@@ -10,10 +10,12 @@ from copy import deepcopy
 
 from .core import (HARNESSES, MAX_RECORD_BYTES, MAX_RECORDS, RECORD_ID, SAFE_ID,
                    MemoryError, _decode, _digest, _fail, _json, _keys,
-                   _nonempty, _now, _sources, _utc)
+                   _nonempty, _now, _sources, _utc, write_notices)
 
 DETAIL_FIELDS = {'summary', 'conditions', 'domain', 'topics', 'aliases', 'share_with',
-                 'statement_type', 'observed_at', 'source_roles', 'relations', 'extensions', 'task_modes'}
+                 'statement_type', 'observed_at', 'source_roles', 'relations', 'extensions', 'task_modes', 'assurance'}
+LOCATOR_HINT = ('Prefer original_locator {"uri": "file:///absolute/path/to/session-transcript.jsonl", "locator": "line N"}: '
+                'the transcript file stays stable when the host forks or compacts the session id.')
 STATEMENT_TYPES = {'observation', 'experiment', 'result', 'interpretation', 'hypothesis',
                    'user_decision', 'engineering_lesson', 'reference'}
 SOURCE_ROLES = {'owner', 'evidence', 'derivative', 'origin'}
@@ -96,6 +98,8 @@ def validate_details(details, record, project_ids):
             if not isinstance(item['type'], str) or item['type'] not in RELATIONS:
                 _fail('invalid_input', 'Unsupported relation type')
             _sources([{'uri': item['uri']}])
+    if 'assurance' in details and details['assurance'] != 'model-extracted':
+        _fail('invalid_input', 'details.assurance may only mark a model-extracted capture')
     if 'extensions' in details and not isinstance(details['extensions'], dict):
         _fail('invalid_input', 'extensions must be an optional JSON object')
     if 'narrative' in details.get('extensions', {}):
@@ -220,7 +224,8 @@ def curate(store, context, id, review, idempotency_key, details=None, retired=No
             prior_payload = {k: v for k, v in prior[1]['payload'].items() if k != 'previous'}
             if prior[0] != id or _digest(prior_payload) != _digest(request):
                 _fail('idempotency_conflict', 'Curation key was used with a different payload')
-            return {'status': 'ok', 'id': id, 'curation_revision': current['curation_revision'], 'replayed': True}
+            return {'status': 'ok', 'id': id, 'curation_revision': current['curation_revision'], 'replayed': True,
+                    **_notices([_json(details)], review['evidence'])}
         if expected_content_digest is not None and expected_content_digest != r['content_digest']:
             _fail('stale_record', 'Record content changed since the source check')
         if expected_revision is not None and expected_revision != current['curation_revision']:
@@ -230,6 +235,8 @@ def curate(store, context, id, review, idempotency_key, details=None, retired=No
         new_extensions = merged.get('extensions', {})
         if capture_digest is None and new_extensions.get('live_review') != old_extensions.get('live_review'):
             _fail('immutable_assurance', 'Live provenance is created only by reviewed current-message capture')
+        if capture_digest is None and merged.get('assurance') != current['details'].get('assurance'):
+            _fail('immutable_assurance', 'Extraction assurance is set only at capture time')
         if r['status'] == 'active' and old_extensions.get('narrative', {}).get('replaces') != new_extensions.get('narrative', {}).get('replaces'):
             _fail('immutable_correction', 'Publish a successor rather than changing accepted replacement links')
         validate_details(merged, r, {p['id'] for p in store._registry()['projects']})
@@ -245,7 +252,13 @@ def curate(store, context, id, review, idempotency_key, details=None, retired=No
             _fail('curation_limit', 'Curation journal exceeds its explicit local bound')
         path = store.collection_directory(scope['project_id'], 'curation') / (id + '.json')
         store._publish(path, data)
-        return {'status': 'ok', 'id': id, 'curation_revision': _digest(doc), 'replayed': False}
+        return {'status': 'ok', 'id': id, 'curation_revision': _digest(doc), 'replayed': False,
+                **_notices([_json(details)], review['evidence'])}
+
+
+def _notices(texts, sources, extra=()):
+    notices = write_notices(texts, sources) + list(extra)
+    return {'notices': notices} if notices else {}
 
 
 def capture(store, context, record, idempotency_key, review=None, details=None, *, live_correction=None):
@@ -266,6 +279,10 @@ def capture(store, context, record, idempotency_key, review=None, details=None, 
             _fail('invalid_input', 'Task-scoped records require context.task_id')
         validate_details(details, {**record, 'project_id': scope['project_id']},
                          {p['id'] for p in store._registry()['projects']})
+        hint = ([{'code': 'live_locator_missing', 'message': LOCATOR_HINT}]
+                if isinstance(live_correction, dict) and live_correction.get('original_locator') is None else [])
+        notices = _notices([record['title'], record['body'], _json(details)],
+                           record['sources'] + (review['evidence'] if review else []), hint)
         digest = _digest({'context': context, 'record': record, 'review': review, 'details': details})
         # Bind the entire call before the first candidate can become visible.
         # The existing proposal only binds context/record, not review/details.
@@ -323,7 +340,7 @@ def capture(store, context, record, idempotency_key, review=None, details=None, 
             status = 'retired' if overlay['recall_retired'] and prior['effective_status'] == 'active' else prior['effective_status']
             return {'status': 'ok', 'id': prior['id'], 'project_id': prior['project_id'],
                     'effective_status': status, 'replayed': True,
-                    'curation_revision': overlay['curation_revision']}
+                    'curation_revision': overlay['curation_revision'], **notices}
         if not has_receipt:
             # Completed pre-repair calls already have a full binding in curation.
             records = store._effective(store._load(scope['project_id']))
@@ -351,4 +368,4 @@ def capture(store, context, record, idempotency_key, review=None, details=None, 
     full = store.read(context, [id], include_inactive=True, include_shared=False)['items'][0]
     return {'status': 'ok', 'id': id, 'project_id': full['project_id'],
             'effective_status': full['effective_status'], 'replayed': proposal['replayed'],
-            'curation_revision': full['curation_revision']}
+            'curation_revision': full['curation_revision'], 'assurance': full['assurance'], **notices}

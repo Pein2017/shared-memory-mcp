@@ -215,7 +215,7 @@ def test_repeated_bounded_reads_and_draft_repairs_can_exceed_former_totals(tmp_p
     engine, store, _, _, policy, owner, _ = environment(tmp_path)
     set_policy(store, policy, lambda p: p['budgets'].update(source_bytes=512))
     run = engine.start(sources=[{'grant_id': 'owner'}])
-    assert set(run['budgets']) == {'source_bytes', 'events', 'operations', 'view_chars', 'view_bytes'}
+    assert set(run['budgets']) == {'source_bytes', 'events', 'operations'}
     rid, gen = run['run_id'], run['generation']
     key = engine.materials(rid, 'owner')['sources']['owner']['events'][0]['key']
     read_bytes = 0

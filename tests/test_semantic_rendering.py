@@ -61,8 +61,8 @@ def test_ordinary_consumers_show_routes_and_clean_legacy_internals_while_audit_s
     card = store.search(caller, 'unresolved')['items'][0]
     search = store.search(caller, 'unresolved')
     context = store.context(caller, query='unresolved')
-    ordinary = call(store, 'read', {'context': caller, 'ids': [record['id']]})['items'][0]
-    audited = call(store, 'read', {'context': caller, 'ids': [record['id']], 'audit': True})['items'][0]
+    ordinary = call(store, 'read', {'caller': caller, 'ids': [record['id']]})['items'][0]
+    audited = call(store, 'read', {'caller': caller, 'ids': [record['id']], 'audit': True})['items'][0]
 
     assert DIGEST not in card['body'] and DIGEST not in context['text'] and DIGEST not in ordinary['body']
     assert '/tmp/owner.md' in context['text']
@@ -86,13 +86,13 @@ def test_ordinary_detail_continuation_reassembles_the_sanitized_account(memory):
     record = store.promote(caller, candidate['id'], {'reason': 'Reviewed the source text and scope.',
                             'evidence': sources}, 'long-semantic-render:approve')['record']
 
-    first = call(store, 'read', {'context': caller, 'ids': [record['id']], 'max_bytes': 1024})
-    page = first['items'][0]['detail_page']
+    first = call(store, 'read', {'caller': caller, 'ids': [record['id']], 'max_bytes': 1280})
+    page = first['items'][0]['cursor']
     fragments = []
     while page:
-        result = call(store, 'read', {'context': caller, 'ids': [record['id']], 'max_bytes': 1024, 'page': page})
+        result = call(store, 'read', {'caller': caller, 'ids': [record['id']], 'max_bytes': 1280, 'cursor': page})
         fragments.append(result['detail_page']['text'])
-        page = result['next_page']
+        page = result['next_cursor']
 
     detail = json.loads(''.join(fragments))
     assert 'A bounded qualification remains part of the semantic account.' in detail['body']

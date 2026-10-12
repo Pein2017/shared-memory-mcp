@@ -35,7 +35,7 @@ try {
   assert.ok(contextTool, session.getAllTools().map(t => t.name).join(","));
   const caller = () => ({ cwd: options.project, harness: "pi", session_id: manager.getSessionId(), actor: "pi" });
   async function contextCall(id, mode, query, previousRevision) {
-    const args = { context: caller(), task_mode: mode, query,
+    const args = { caller: caller(), task_mode: mode, query,
       ...(previousRevision ? { previous_revision: previousRevision } : {}) };
     const result = await contextTool.execute(id, args, undefined, undefined);
     assert.ok(result.content);

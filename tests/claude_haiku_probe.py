@@ -17,7 +17,7 @@ from shared_memory_mcp.core import MemoryStore
 
 SOURCE = Path(__file__).resolve().parents[1]
 MODEL = 'claude-haiku-4-5-20251001'
-TOOLS = ['context','search','read','create','approve','update','delete']
+TOOLS = ['context','search','read','capture','approve','supersede','withdraw']
 
 
 def unpack(response):
@@ -38,12 +38,12 @@ async def peer_operations(cli, root, project, source, words, identifier=None):
             async with ClientSession(reader,writer) as session:
                 await session.initialize()
                 if identifier:
-                    records[harness] = unpack(await session.call_tool('read',{'context':context,'ids':[identifier]}))['items'][0]
+                    records[harness] = unpack(await session.call_tool('read',{'caller':context,'ids':[identifier]}))['items'][0]
                 else:
                     record = {'kind':'observation','title':'Synthetic '+harness+' peer','body':words[harness],
                               'scope':'project','sources':[source]}
-                    proposed = unpack(await session.call_tool('create',{'context':context,'record':record,'idempotency_key':'seed-'+harness}))['record']
-                    records[harness] = unpack(await session.call_tool('approve',{'context':context,'id':proposed['id'],
+                    proposed = unpack(await session.call_tool('capture',{'caller':context,'record':record,'idempotency_key':'seed-'+harness}))['record']
+                    records[harness] = unpack(await session.call_tool('approve',{'caller':context,'id':proposed['id'],
                         'review':{'reason':'Synthetic fixture value supplied by test owner','evidence':[source]},
                         'idempotency_key':'review-'+harness}))['record']
     return records
@@ -213,7 +213,7 @@ def main():
             assert set(receipt['reported_models'])=={MODEL}, receipt
             assert words['startup'] in text and all(words[name] in text for name in ('codex','pi')), 'Startup/peer values missing'
             used = {name.rsplit('__',1)[-1] for name in receipt['tools']}
-            assert used=={'read','create','approve'}, receipt
+            assert used=={'read','capture','approve'}, receipt
             context = {'cwd':str(project),'harness':'claude','session_id':'lead-readback','actor':'lead'}
             captured = next(item for item in store.search(context,'Claude native Haiku qualification')['items'] if item.get('body')==words['claude'])
             assert captured['effective_status']=='active' and captured['provenance']['harness']=='claude'

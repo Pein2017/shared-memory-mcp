@@ -155,21 +155,26 @@ class CollaborationStore:
     def read(self, context, ids, include_inactive=False, *, include_shared=False):
         if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(not isinstance(i, str) or not RECORD_ID.fullmatch(i) for i in ids):
             _fail('invalid_input', 'Read canonical collaboration IDs')
-        with self.store._gate():
+        with self.store._gate(read=True):
             scope, records = self._records(context, include_inactive)
             by_id = {r['id']: r for r in records}
             return {'status': 'ok', 'collection': 'collaboration', 'scope': scope,
                     'items': [by_id[i] for i in ids if i in by_id], 'missing_ids': [i for i in ids if i not in by_id]}
 
     def search(self, context, query, limit=20, include_inactive=False, *, offset=0, expected_revision=None,
-               task_mode=None, mode_restriction=None, **options):
+               task_mode=None, mode_restriction=None, statuses=None, scopes=None, **options):
         from .context_packet import validate_mode
-        from .recall import rank, size
+        from .recall import STATUSES, _filter, rank, size
         validate_mode(task_mode, mode_restriction)
         if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or offset < 0:
             _fail('invalid_input', 'Search limit and offset must be bounded nonnegative integers')
-        with self.store._gate():
-            scope, records = self._records(context, include_inactive)
+        if scopes is not None:
+            _fail('invalid_input', 'Scope qualifiers apply to the project collection')
+        statuses = _filter(statuses, 'statuses', STATUSES)
+        with self.store._gate(read=True):
+            scope, records = self._records(context, include_inactive or statuses is not None)
+            if statuses is not None:
+                records = [r for r in records if r['effective_status'] in statuses]
             revision = _digest([scope, query, task_mode, mode_restriction, records])
             if expected_revision is not None and expected_revision != revision:
                 _fail('stale_search', 'Refresh collaboration search after a corpus change')
@@ -380,3 +385,122 @@ class CollaborationStore:
             self.store._publish(safe_path(self.store, f'collaboration/Pein/records/{id}.md'), markdown(canonical))
             return {'status': 'ok', 'id': id, 'collection': 'collaboration', 'replayed': False,
                     'curation_revision': _digest(canonical['events'])}
+
+
+# --- Operator retention and diagnostics (doctor) ------------------------------
+# Prune reads Dreaming files as data and never imports the engine. It removes only
+# derived coordination state; records, journals, receipts, views and issues stay.
+KEEP_CONFIG_BACKUPS = 3
+_HEX64 = re.compile(r'[0-9a-f]{64}')
+
+
+def _json_file(path):
+    from .core import _decode
+    try:
+        return _decode(path.read_text('utf-8'))
+    except (OSError, ValueError, MemoryError):
+        return None
+
+
+def _runs(store):
+    directory = store.root / 'dreaming' / 'runs'
+    return {path.parent.name: _json_file(path) for path in sorted(directory.glob('*/run.json'))} if directory.is_dir() else {}
+
+
+def _closed_lane_markers(store, runs):
+    for path in sorted((store.root / 'dreaming' / 'active').glob('*.json')):
+        marker = _json_file(path)
+        run = runs.get(marker['run_id']) if isinstance(marker, dict) and isinstance(marker.get('run_id'), str) else None
+        if not isinstance(run, dict) or run.get('phase') != 'closed':
+            continue
+        # A closed run whose checkpoint index is not yet published still needs its marker for recovery.
+        lane_checkpoint = store.root / 'dreaming' / 'checkpoints' / f"{run.get('profile_id')}-{run.get('lane')}.json"
+        if run.get('checkpoint') and _json_file(lane_checkpoint) != run['checkpoint']:
+            continue
+        yield path, 'lane marker points at closed run ' + marker['run_id']
+
+
+def _orphan_objective_checkpoints(store, runs):
+    directory = store.root / 'dreaming' / 'checkpoints' / 'objectives'
+    if not directory.is_dir():
+        return
+    # Conservative reachability: any 64-hex token in any other Dreaming JSON file is a root.
+    texts = [p.read_text('utf-8', errors='replace') for p in (store.root / 'dreaming').rglob('*.json')
+             if directory not in p.parents and p.is_file()]
+    reachable, pending = set(), {d for text in texts for d in _HEX64.findall(text)}
+    while pending:
+        digest = pending.pop()
+        if digest in reachable:
+            continue
+        reachable.add(digest)
+        document = _json_file(directory / (digest + '.json'))
+        for shard in (document or {}).get('shards', []) if isinstance(document, dict) else []:
+            pending.add(shard.get('digest'))
+    for path in sorted(directory.glob('*.json')):
+        if path.stem not in reachable:
+            yield path, 'objective checkpoint shard referenced by no run'
+
+
+def _unpublished_closed_drafts(store, runs):
+    for run_id, run in runs.items():
+        if not isinstance(run, dict) or run.get('phase') != 'closed':
+            continue
+        run_dir = store.root / 'dreaming' / 'runs' / run_id
+        for path in sorted((run_dir / 'drafts').glob('*.json')):
+            draft = _json_file(path)
+            keys = [op.get('key') for op in (draft or {}).get('operations', [])] if isinstance(draft, dict) else []
+            if draft is None or any(k in run.get('receipts', {}) or (run_dir / 'intents' / (_digest(k) + '.json')).exists()
+                                    for k in keys):
+                continue
+            yield path, f'unpublished draft of closed run {run_id}'
+
+
+def _old_config_backups(store):
+    directory = store.root / '.state' / 'config-backups'
+    backups = sorted(p for p in directory.iterdir() if p.is_dir() and not p.is_symlink()) if directory.is_dir() else []
+    for path in backups[:-KEEP_CONFIG_BACKUPS]:
+        yield path, f'configuration backup beyond the newest {KEEP_CONFIG_BACKUPS}'
+
+
+def prune(store, apply=False):
+    """Dry run lists (path, reason); apply removes exactly the listed paths under the writer gate."""
+    import shutil
+    with store._gate():
+        runs = _runs(store)
+        listed = [*_closed_lane_markers(store, runs), *_orphan_objective_checkpoints(store, runs),
+                  *_unpublished_closed_drafts(store, runs), *_old_config_backups(store)]
+        for path, _ in listed if apply else ():
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+    return {'status': 'ok', 'applied': bool(apply),
+            'items': [{'path': str(path.relative_to(store.root)), 'reason': reason} for path, reason in listed]}
+
+
+def missing_sources(store):
+    """Records whose file:// sources no longer exist (original owners moved or deleted)."""
+    from urllib.parse import unquote, urlparse
+    from .curation import projected_records
+    items = []
+    with store._gate(read=True):
+        for entry in store._registry()['projects']:
+            for r in projected_records(store, entry['id']):
+                gone = [s['uri'] for s in r['sources'] if urlparse(s['uri']).scheme == 'file' and
+                        not Path(unquote(urlparse(s['uri']).path)).exists()]
+                if gone:
+                    items.append({'id': r['id'], 'project_id': r['project_id'],
+                                  'effective_status': r['effective_status'], 'missing': gone})
+    return {'status': 'ok', 'items': items}
+
+
+def permission_report(store, mode=0o700, limit=100):
+    """Report store directories more permissive than the private mode; never chmod."""
+    import os
+    loose = []
+    for directory, names, _ in os.walk(store.root):
+        names[:] = [n for n in names if n != '.venv' and not os.path.islink(os.path.join(directory, n))]
+        actual = os.stat(directory).st_mode & 0o777
+        if actual & ~mode:
+            loose.append({'path': directory, 'mode': oct(actual), 'expected': oct(mode)})
+    return {'expected_mode': oct(mode), 'deviations': loose[:limit], 'deviations_omitted': max(0, len(loose) - limit)}

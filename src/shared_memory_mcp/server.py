@@ -16,6 +16,14 @@ class CallContext(TypedDict):
     project_id: NotRequired[str]
 
 
+class Caller(CallContext):
+    """v0.3 caller identity; lineage fields are origin provenance and never widen scope or authority."""
+    __pydantic_config__ = {'extra': 'forbid'}
+    role: NotRequired[Literal['lead', 'worker']]
+    model: NotRequired[str]
+    parent_session_id: NotRequired[str]
+
+
 class Source(TypedDict):
     __pydantic_config__ = {'extra': 'forbid'}
     uri: str

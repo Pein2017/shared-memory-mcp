@@ -12,6 +12,25 @@ from shared_memory_mcp.dreaming import configure_policy
 OBJECTIVE = {'id': 'engine-baseline', 'question': 'Review the applicable fixture history.'}
 
 
+def test_claude_history_root_reaches_catalog_and_retained_materials(tmp_path):
+    from test_dream_sources import claude_message, line
+    engine, store, _, _, policy, _, _ = environment(tmp_path)
+    root = tmp_path / 'claude-projects'
+    project = root / 'encoded-project'
+    project.mkdir(parents=True)
+    (project / 'session.jsonl').write_bytes(line(claude_message('claude-event', None, text='Historical Claude text.')))
+    updated = deepcopy(policy)
+    history = {'path': str(root), 'format': 'claude', 'schema': 'claude-jsonl-v1', 'native_version': 'fixture-v1'}
+    updated['profiles']['fixture'].update(read_access='inherited', history_roots=[history])
+    configure_policy(store, updated, expected_revision=_digest(policy))
+    assert engine.catalog()['history_roots'] == [history]
+    run = engine.start(review_objective=OBJECTIVE)
+    sources = engine.materials(run['run_id'])['sources']
+    events = [event for source in sources.values() for event in source['events'] if event['harness'] == 'claude']
+    assert [event['text'] for event in events] == ['Historical Claude text.']
+    assert events[0]['branch'] == 'unspecified' and events[0]['human'] == 'unknown'
+
+
 def historical_environment(tmp_path):
     engine, store, caller, owner_caller, policy, owner, human = environment(tmp_path)
     root = tmp_path / 'native'
@@ -118,6 +137,7 @@ def test_memory_pending_statuses_and_changed_revision_are_guarded(tmp_path):
     engine.close(run['run_id'], 1)
     second = engine.start(review_objective=OBJECTIVE)
     assert second['objective_progress']['remaining_memory'] == 1
+    engine.materials(second['run_id'], event_key=ref)
     engine.mark_processed(second['run_id'], 1, {ref: 'no-signal'})
     assert engine.changes(second['run_id'])['objective_progress']['ready_memory'][0]['ref'] == ref
     assert len(_json(engine.changes(second['run_id'], max_bytes=12000)).encode()) <= 12000
@@ -140,6 +160,7 @@ def test_completed_objective_changed_memory_needs_new_review(tmp_path):
     ref = 'record:' + identifier
     first = engine.start(review_objective=OBJECTIVE)
     mark_sources(engine, first)
+    engine.materials(first['run_id'], event_key=ref)
     engine.mark_processed(first['run_id'], 1, {ref: 'no-signal'})
     engine.close(first['run_id'], 1, objective_outcome='reviewed')
     store.promote(owner_caller, identifier, {'reason': 'Fixture later memory revision.',
@@ -151,6 +172,7 @@ def test_completed_objective_changed_memory_needs_new_review(tmp_path):
     with pytest.raises(MemoryError) as error:
         engine.close(second['run_id'], 1, objective_outcome='reviewed')
     assert error.value.code == 'pending_objective'
+    engine.materials(second['run_id'], event_key=ref)
     engine.mark_processed(second['run_id'], 1, {ref: 'no-signal'})
     engine.close(second['run_id'], 1, objective_outcome='reviewed')
     assert engine.start(review_objective=OBJECTIVE)['status'] == 'no-change'

@@ -10,7 +10,7 @@ from dreaming_helpers import environment, claim
 
 
 def invoke(store, caller, tool, collection, **kwargs):
-    return call_operation(store, tool, {'context': caller, 'collection': collection, **kwargs})
+    return call_operation(store, tool, {'caller': caller, 'collection': collection, **kwargs})
 
 
 def live():
@@ -38,16 +38,16 @@ def test_live_collaboration_capture_is_shared_normal_lifecycle(tmp_path):
                     idempotency_key='live-pref', review=review(record), live_correction=live())
     replay = invoke(store, caller, 'capture', 'collaboration', record=record,
                     idempotency_key='live-pref', review=review(record), live_correction=live())
-    assert replay['id'] == result['id'] and replay['replayed']
-    full = invoke(store, caller, 'read', 'collaboration', ids=[result['id']])['items'][0]
+    assert replay['item']['id'] == result['item']['id'] and replay['replayed']
+    full = invoke(store, caller, 'read', 'collaboration', ids=[result['item']['id']])['items'][0]
     assert full['live_review']['assurance'] == 'agent-reviewed'
     assert full['live_review']['caller']['session_id'] == caller['session_id']
     assert '/new/project-path' in store.context(caller, task_mode='general')['text']
     assert '/new/project-path' not in store.context(caller, task_mode='research')['text']
     assert '/new/project-path' not in store.context(caller)['text']
-    invoke(store, caller, 'delete', 'collaboration', id=result['id'], review=review(record), idempotency_key='withdraw-pref')
+    invoke(store, caller, 'withdraw', 'collaboration', id=result['item']['id'], review=review(record), idempotency_key='withdraw-pref')
     assert '/new/project-path' not in store.context(caller, task_mode='general')['text']
-    assert invoke(store, caller, 'read', 'collaboration', ids=[result['id']], include_inactive=True)['items'][0]['effective_status'] == 'withdrawn'
+    assert invoke(store, caller, 'read', 'collaboration', ids=[result['item']['id']], include_inactive=True)['items'][0]['effective_status'] == 'withdrawn'
 
 
 def test_inferred_preference_stays_candidate_until_review(tmp_path):
@@ -56,11 +56,11 @@ def test_inferred_preference_stays_candidate_until_review(tmp_path):
     record['claim']['level'] = 'inferred'
     made = invoke(store, caller, 'capture', 'collaboration', record=record,
                   review=review(record), live_correction=live(), idempotency_key='inferred')
-    assert made['effective_status'] == 'candidate'
+    assert made['item']['effective_status'] == 'candidate'
     assert not invoke(store, caller, 'search', 'collaboration', query='installation')['items']
-    invoke(store, caller, 'approve', 'collaboration', id=made['id'],
+    invoke(store, caller, 'approve', 'collaboration', id=made['item']['id'],
            review=review(record), idempotency_key='inferred-review')
-    full = invoke(store, caller, 'read', 'collaboration', ids=[made['id']])['items'][0]
+    full = invoke(store, caller, 'read', 'collaboration', ids=[made['item']['id']])['items'][0]
     assert full['claim']['level'] == 'inferred' and full['effective_status'] == 'active'
 
 
@@ -74,17 +74,17 @@ def test_history_is_explicit_source_linked_and_not_startup_knowledge(tmp_path):
     record = {'kind': 'episode', 'title': 'Finite fit episode', 'body': 'Historical task: finite fit succeeded, preservation unreviewed.',
               'scope': 'project', 'sources': [{'uri': owner.as_uri()}], 'episode': episode}
     result = invoke(store, caller, 'capture', 'history', record=record, review=review(record), idempotency_key='history')
-    assert (store.root / 'history/demo/episodes' / (result['id'] + '.md')).is_file()
-    assert not (store.root / 'records/demo' / (result['id'] + '.md')).exists()
+    assert (store.root / 'history/demo/episodes' / (result['item']['id'] + '.md')).is_file()
+    assert not (store.root / 'records/demo' / (result['item']['id'] + '.md')).exists()
     assert not store.search(caller, 'finite fit')['items']
     assert 'finite fit succeeded' not in store.context(caller, task_mode='research')['text']
     found = invoke(store, caller, 'search', 'history', query='finite fit')['items']
     assert found and found[0]['collection'] == 'history'
-    raw = invoke(store, caller, 'read', 'history', ids=[result['id']])['items'][0]
+    raw = invoke(store, caller, 'read', 'history', ids=[result['item']['id']])['items'][0]
     assert raw['episode'] == episode
-    invoke(store, caller, 'delete', 'history', id=result['id'], review=review(record), idempotency_key='delete-history')
+    invoke(store, caller, 'withdraw', 'history', id=result['item']['id'], review=review(record), idempotency_key='delete-history')
     assert not invoke(store, caller, 'search', 'history', query='finite fit')['items']
-    assert invoke(store, caller, 'read', 'history', ids=[result['id']], include_inactive=True)['items']
+    assert invoke(store, caller, 'read', 'history', ids=[result['item']['id']], include_inactive=True)['items']
     with pytest.raises(MemoryError):
         invoke(store, caller, 'capture', 'project', record=record, review=review(record), idempotency_key='not-knowledge')
 

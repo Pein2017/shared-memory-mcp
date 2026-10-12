@@ -39,6 +39,41 @@ def test_config_collisions_fail_without_changing_input():
         installer.add_hook(duplicate, "own")
 
 
+def test_claude_hook_upgrades_owned_matcher_and_preserves_codex():
+    original = installer.add_hook({}, "own")
+    upgraded = installer.add_hook(original, "own", harness="claude")
+    assert upgraded['hooks']['SessionStart'][0]['matcher'] == 'startup|resume|clear|compact|fork'
+    assert original['hooks']['SessionStart'][0]['matcher'] == 'startup|resume|clear|compact'
+    assert installer.add_hook(upgraded, "own", harness="claude") == upgraded
+    assert installer.add_hook(original, "own") == original
+    assert upgraded['hooks']['SessionStart'][0]['hooks'] == original['hooks']['SessionStart'][0]['hooks']
+    conflicting = json.loads(json.dumps(original))
+    conflicting['hooks']['SessionStart'][0]['matcher'] = 'startup|invented'
+    with pytest.raises(ValueError):
+        installer.add_hook(conflicting, "own", harness="claude")
+    shared = json.loads(json.dumps(original))
+    shared['hooks']['SessionStart'][0]['hooks'].append({'type': 'command', 'command': 'other'})
+    with pytest.raises(ValueError):
+        installer.add_hook(shared, "own", harness="claude")
+    assert shared['hooks']['SessionStart'][0]['matcher'] == original['hooks']['SessionStart'][0]['matcher']
+
+
+def test_subagent_start_group_is_owned_idempotent_and_claude_only():
+    session = installer.add_hook({"hooks": {"SubagentStart": [{"hooks": [{"type": "command", "command": "other"}]}]}},
+                                 "own", harness="claude")
+    first = installer.add_hook(session, "own", harness="claude", event="SubagentStart")
+    assert installer.add_hook(first, "own", harness="claude", event="SubagentStart") == first
+    assert first["hooks"]["SubagentStart"] == [{"hooks": [{"type": "command", "command": "other"}]},
+                                               {"hooks": [{"type": "command", "command": "own", "timeout": 15}]}]
+    assert first["hooks"]["SessionStart"] == session["hooks"]["SessionStart"]
+    with pytest.raises(ValueError):
+        installer.add_hook({}, "own", event="SubagentStart")
+    conflicting = json.loads(json.dumps(first))
+    conflicting["hooks"]["SubagentStart"][1]["matcher"] = "explore"
+    with pytest.raises(ValueError):
+        installer.add_hook(conflicting, "own", harness="claude", event="SubagentStart")
+
+
 def test_only_owned_native_hook_can_be_selected_for_trust():
     owned = {"command": "own", "sourcePath": "/fixture/hooks.json", "eventName": "sessionStart",
              "currentHash": "sha256:test", "key": "owned"}
@@ -143,8 +178,11 @@ def test_optional_claude_install_preserves_and_backs_up_native_configuration(tmp
     settings = json.loads((claude_dir / "settings.json").read_text())
     assert settings["model"] == "preserved" and settings["autoMemoryEnabled"] is True
     assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "other"
-    assert settings["hooks"]["SessionStart"][1]["matcher"] == "startup|resume|clear|compact"
+    assert settings["hooks"]["SessionStart"][1]["matcher"] == "startup|resume|clear|compact|fork"
     assert "--harness claude" in settings["hooks"]["SessionStart"][1]["hooks"][0]["command"]
+    assert plan["claude_subagent_hook"]["event"] == "SubagentStart"
+    assert settings["hooks"]["SubagentStart"] == [{"hooks": [{"type": "command", "timeout": 15,
+        "command": settings["hooks"]["SessionStart"][1]["hooks"][0]["command"]}]}]
     account = json.loads((claude_dir / ".claude.json").read_text())
     assert account["account"] == {"preserve": True} and "other" in account["mcpServers"]
     assert not (claude_dir / "skills").exists()
