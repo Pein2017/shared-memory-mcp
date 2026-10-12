@@ -42,10 +42,11 @@ async def peer_operations(cli, root, project, source, words, identifier=None):
                 else:
                     record = {'kind':'observation','title':'Synthetic '+harness+' peer','body':words[harness],
                               'scope':'project','sources':[source]}
-                    proposed = unpack(await session.call_tool('capture',{'caller':context,'record':record,'idempotency_key':'seed-'+harness}))['record']
-                    records[harness] = unpack(await session.call_tool('approve',{'caller':context,'id':proposed['id'],
+                    proposed = unpack(await session.call_tool('capture',{'caller':context,'record':record,'idempotency_key':'seed-'+harness}))['item']
+                    unpack(await session.call_tool('approve',{'caller':context,'id':proposed['id'],
                         'review':{'reason':'Synthetic fixture value supplied by test owner','evidence':[source]},
-                        'idempotency_key':'review-'+harness}))['record']
+                        'idempotency_key':'review-'+harness}))
+                    records[harness] = unpack(await session.call_tool('read',{'caller':context,'ids':[proposed['id']]}))['items'][0]
     return records
 
 
@@ -180,6 +181,10 @@ def main():
             bootstrap = store.propose(seed_context,{'kind':'invariant','title':'Startup-only sentinel','body':words['startup'],
                 'scope':'project','sources':[source]},'seed-startup')['record']
             store.promote(seed_context,bootstrap['id'],{'reason':'Synthetic fixture','evidence':[source]},'review-startup')
+            # Startup delivers reviewed background units only; mark the sentinel as compact background like the native probe does.
+            store.curate(seed_context,bootstrap['id'],{'reason':'Reviewed synthetic compact background','evidence':[source]},'curate-startup',
+                details={'summary':words['startup'],'conditions':'Synthetic fixture only; no scientific support.',
+                         'extensions':{'narrative':{'id':'native.background','role':'background','compact':words['startup']}}})
             peers = asyncio.run(peer_operations(args.cli,root,project,source,words))
             home = run/'native-config';home.mkdir(mode=0o700)
             settings = run/'settings.json'; mcp = run/'mcp.json'
@@ -215,7 +220,8 @@ def main():
             used = {name.rsplit('__',1)[-1] for name in receipt['tools']}
             assert used=={'read','capture','approve'}, receipt
             context = {'cwd':str(project),'harness':'claude','session_id':'lead-readback','actor':'lead'}
-            captured = next(item for item in store.search(context,'Claude native Haiku qualification')['items'] if item.get('body')==words['claude'])
+            card = next(item for item in store.search(context,'Claude native Haiku qualification')['items'] if item.get('body')==words['claude'])
+            captured = store.read(context,[card['id']])['items'][0]  # cards omit provenance; full read keeps it
             assert captured['effective_status']=='active' and captured['provenance']['harness']=='claude'
             assert captured['provenance']['session_id']==receipt['session_id'] and captured['sources']==[source]
             readback = asyncio.run(peer_operations(args.cli,root,project,source,words,captured['id']))
