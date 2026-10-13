@@ -67,7 +67,7 @@ def error_result(exc):
     return _text({'status': 'error', 'diagnostic': diagnostic}, error=True)
 
 
-def register(server, store, *, icons, readonly, append, revise):
+def register(server, store, *, icons, readonly, append, revise, replace):
     def invoke(name, **arguments):
         try:
             return _text(call(store, name, arguments))
@@ -160,17 +160,17 @@ def register(server, store, *, icons, readonly, append, revise):
         """Run state, objective progress, pending review, unresolved effects and bounded changes against the consumed baseline, with the run revision and `next`."""
         return invoke('dream_status', caller=caller, run_id=run_id, max_bytes=max_bytes)
 
-    @server.tool(title='Read frozen materials', icons=icons, annotations=append)
+    @server.tool(title='Read frozen materials and save progress', icons=icons, annotations=revise)
     def dream_materials(caller: Caller, run_id: str, source_id: str | None = None, event_key: str | None = None,
                         cursor: str | None = None, max_bytes: int | None = None) -> CallToolResult:
-        """Read admitted frozen material; long events page with cursor. Records which material was served; reading does not mark review complete."""
+        """Read admitted frozen material; long events page with cursor. Persists read progress and served-material state in this local run; rereading the first page resets its page progress. Does not mark review complete or publish memory."""
         return invoke('dream_materials', caller=caller, run_id=run_id, source_id=source_id, event_key=event_key,
                       cursor=cursor, max_bytes=max_bytes)
 
-    @server.tool(title='Freeze reviewed draft', icons=icons, annotations=append)
+    @server.tool(title='Freeze reviewed draft', icons=icons, annotations=replace)
     def dream_draft(caller: Caller, run_id: str, expected_revision: str, operations: list[dict],
                     reconsider_reason: str | None = None) -> CallToolResult:
-        """Freeze reviewed source-linked operations against the run revision and return the frozen draft. {"type":"coverage","statuses":{event_key: processed|excluded|no-signal|pending-review}} records coverage."""
+        """Persist a new local draft and replace the current draft pointer, retaining prior drafts. Repeated calls can create new draft revisions; publication requires dream_publish. {"type":"coverage","statuses":{event_key: processed|excluded|no-signal|pending-review}} records coverage."""
         return invoke('dream_draft', caller=caller, run_id=run_id, expected_revision=expected_revision,
                       operations=operations, reconsider_reason=reconsider_reason)
 
@@ -179,11 +179,11 @@ def register(server, store, *, icons, readonly, append, revise):
         """Publish exactly the frozen permitted operations of this run revision, reconciling prior effects. No caller-selected publisher privilege."""
         return invoke('dream_publish', caller=caller, run_id=run_id, expected_revision=expected_revision)
 
-    @server.tool(title='Close review batch', icons=icons, annotations=append)
+    @server.tool(title='Close review batch', icons=icons, annotations=revise)
     def dream_close(caller: Caller, run_id: str, expected_revision: str, abandon_reason: str | None = None,
                     objective_outcome: Literal['reviewed', 'disposed'] | None = None,
                     accept_gaps: list[dict] | None = None) -> CallToolResult:
-        """Reconcile effects and close a batch. Pending review stays actionable even with unchanged source bytes. accept_gaps names permanent source gaps ({source_id, reason, note}) to advance past."""
+        """Persist closure and checkpoints for this local batch, remove retained event text, and abandon outstanding draft operations only with abandon_reason. Pending review stays actionable even with unchanged source bytes. accept_gaps names permanent source gaps ({source_id, reason, note}) to advance past."""
         return invoke('dream_close', caller=caller, run_id=run_id, expected_revision=expected_revision,
                       abandon_reason=abandon_reason, objective_outcome=objective_outcome, accept_gaps=accept_gaps)
 
@@ -200,10 +200,10 @@ def register(server, store, *, icons, readonly, append, revise):
         return invoke('overview', caller=caller, view=view, scenario=scenario, target_project=target_project,
                       max_bytes=max_bytes, historical=historical, compact=compact, unit_index=unit_index, cursor=cursor)
 
-    @server.tool(title='Open owner improvement issue', icons=icons, annotations=append)
+    @server.tool(title='Open or update owner improvement issue', icons=icons, annotations=replace)
     def issue_open(caller: Caller, run_id: str, expected_revision: str, topic: str, relation: str, note: str,
                    observations: dict, semantic_reviewed: bool = False) -> CallToolResult:
-        """Retain a source-linked inference/owner-improvement proposal, never execute it or rewrite formal owners."""
+        """Create or update a local source-linked proposal keyed by target, topic and relation, replacing its prior note and observations. Repeated calls can change notification state. Does not execute proposals or rewrite formal owners."""
         return invoke('issue_open', caller=caller, run_id=run_id, expected_revision=expected_revision, topic=topic,
                       relation=relation, note=note, observations=observations, semantic_reviewed=semantic_reviewed)
 
