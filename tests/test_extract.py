@@ -470,3 +470,12 @@ def test_zero_cooldown_spawns_every_startup(env):
     assert [x['status'] for x in log_lines(env)] == ['spawned', 'spawned']
     env.configure(min_spawn_interval_minutes=-1)
     assert load_extraction(env.store)['diagnostic'].startswith('invalid_extraction')
+
+
+def test_scratch_cwd_inside_a_harness_home_is_skipped(env):
+    # 2026-10-13: smoke runs under <project>/.claude/jobs/*/tmp resolved to the project, then vanished.
+    scratch = env.project / '.claude' / 'jobs' / 'job' / 'tmp' / 'spike'
+    scratch.mkdir(parents=True)
+    path = env.transcript('smoke', ['Decision.'], cwd=scratch)
+    [session] = extract.run(env.store)['sessions']
+    assert session == {'transcript': str(path), 'state': 'skipped', 'reason': 'scratch_cwd'} and not env.calls()

@@ -86,6 +86,9 @@ class Lost(Exception):
     """The lease was taken over (expired); stop without writing more state."""
 
 
+HARNESS_HOMES = {'.claude', '.codex', '.pi', '.harnessdeck', '.shared-memory'}
+
+
 def _now_iso():
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
@@ -453,6 +456,9 @@ def _extract_one(store, config, owner, path, root, generation):
     try:
         if not caller['cwd'] or not caller['session_id']:
             _fail('missing_session_header', 'Transcript head has no session identity or cwd')
+        # Harness homes hold smoke/job scratch dirs that resolve to the enclosing project and are later deleted.
+        if HARNESS_HOMES.intersection(Path(caller['cwd']).parts):
+            _fail('scratch_cwd', 'Session ran inside a harness home scratch directory')
         store.resolve({k: v for k, v in caller.items() if k in ('cwd', 'harness', 'session_id', 'actor')})
     except MemoryError as exc:
         # Unregistered or vanished cwd: nothing to capture, do not spend a model call; re-checked on growth.
