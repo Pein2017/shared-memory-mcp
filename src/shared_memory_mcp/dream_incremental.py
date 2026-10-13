@@ -7,7 +7,9 @@ reader's finite history window and event-identity bounds remain explicit.
 from __future__ import annotations
 
 from copy import deepcopy
+import os
 import re
+import time
 
 from .core import MAX_RECORD_BYTES, MAX_RECORDS, MemoryError, _digest, _fail, _json
 from .dream_sources import read_source
@@ -19,10 +21,12 @@ UNACCEPTABLE_GAPS = TRANSIENT_GAPS | {'excerpt_truncated', 'unreviewed_range', '
 REVIEWED = {'processed', 'excluded', 'no-signal'}
 # An accepted permanent gap ends pending work without being reviewed content.
 DONE = REVIEWED | {'gap-accepted'}
-DEFAULT_OBJECTIVE = {'id': 'default-maintenance',
-                     'question': 'Maintain this target memory: triage candidates and stale candidates, re-review '
-                                 'self-reviewed actives, duplicate titles, missing sources, expired actives and open issues.'}
+DEFAULT_OBJECTIVE = {'id': 'default-maintenance-v2',
+                     'question': 'Maintain this target memory: triage candidates and stale candidates, '
+                                 'duplicate titles, missing sources, expired actives and open issues.'}
 STALE_DAYS = 7
+# Root discovery only inventories sessions written within this window; explicit sources still reach older files.
+HISTORY_WINDOW_DAYS = 30
 
 
 def _in_scope(progress, kind, key):
@@ -150,6 +154,8 @@ def objective_inventory(catalog, objective, *, previous=None, selections=None, m
                 discovered.append({'grant_id': grant['id']})
             elif grant['format'] in {'pi', 'codex', 'claude'}:
                 roots.append((grant['id'], grant, False))
+        seen = set()  # grants overlapping a root list the same files; count each once
+        horizon, excluded = time.time() - HISTORY_WINDOW_DAYS * 86400, 0
         for locator, root, inherited in roots:
             directories = ['']
             while directories:
@@ -166,6 +172,17 @@ def objective_inventory(catalog, objective, *, previous=None, selections=None, m
                         if item['kind'] == 'directory':
                             directories.append(item['path'])
                         elif item['path'].endswith('.jsonl'):
+                            physical = os.path.realpath(item['absolute_path'] if inherited
+                                                        else os.path.join(root['path'], item['path']))
+                            if physical in seen:
+                                continue
+                            seen.add(physical)
+                            try:
+                                if os.stat(physical).st_mtime < horizon:
+                                    excluded += 1
+                                    continue
+                            except OSError:
+                                pass  # Unreadable files stay in the inventory and surface as gaps.
                             discovered.append(({'absolute_path': item['absolute_path'],
                                 **{k: root[k] for k in ('format', 'schema', 'native_version', 'native_versions') if k in root}}
                                 if inherited else {'grant_id': locator, 'path': item['path']}))
@@ -174,6 +191,7 @@ def objective_inventory(catalog, objective, *, previous=None, selections=None, m
                     cursor = page['next_cursor']
                     if cursor is None:
                         break
+        progress['history_window'] = {'days': HISTORY_WINDOW_DAYS, 'excluded': excluded}
         # Prefer roots over exact grants for physical duplicates.
         discovered.sort(key=lambda item: 'absolute_path' not in item)
     elif selections is not None:
@@ -238,9 +256,10 @@ def objective_batch(catalog, progress, budgets):
                                 max_events=min(events_left, 1024))
             cost = page['coverage']['read_bytes'] + page['coverage']['verification_bytes']
             progress['batch_read_bytes'] += cost
-            remaining -= cost
+            # Verification re-hashes the page and its prefix, so it is charged to the batch total, not the page allocation.
+            over, remaining = cost > remaining, remaining - cost
             # Keep room for the retained Run collection and publication checks.
-            if cost > allocation or page['coverage']['read_bytes'] > allocation:
+            if over or page['coverage']['read_bytes'] > allocation:
                 entry['gaps'] = [{'reason': 'source_budget_exhausted'}]
                 continue
             entry['pending_page'] = {'selection': page['selection'], 'next_cursor': page['next_cursor'],
@@ -348,7 +367,8 @@ def objective_observe(progress):
             'gaps': gaps[:16], 'omitted_gaps': max(0, len(gaps) - 16),
             'reviewed_sources': reviewed[:16], 'omitted_reviewed_sources': max(0, len(reviewed) - 16),
             'accepted_gaps': accepted[:16], 'omitted_accepted_gaps': max(0, len(accepted) - 16),
-            'linked_runs': len(progress['linked_runs']), 'inventory_complete': progress['inventory_complete']}
+            'linked_runs': len(progress['linked_runs']), 'inventory_complete': progress['inventory_complete'],
+            'history_window': progress.get('history_window')}
 
 
 def rebase(progress, objective, *, scope=None):
@@ -394,8 +414,8 @@ def apply_reread(progress, reread):
 
 
 def default_inventory(store, target, memory, *, limit=64):
-    """Default objective deliverable, in order: candidates by age, self-reviewed actives, duplicate
-    titles, missing file sources, expired actives and open issues. Reads no native history."""
+    """Default objective deliverable, in order: candidates by age, duplicate titles, missing file
+    sources, expired actives and open issues. Reads no native history. Self-review is a card label only."""
     from datetime import datetime, timezone
     from pathlib import Path
     from urllib.parse import unquote, urlparse
@@ -415,10 +435,6 @@ def default_inventory(store, target, memory, *, limit=64):
     items = [row(r, 'stale-candidate' if (now - last_operation(r)).days >= STALE_DAYS else 'candidate')
              for r in sorted((r for r in records if r['effective_status'] == 'candidate'), key=last_operation)]
     live = [r for r in records if r['effective_status'] in {'active', 'candidate'}]
-    for r in live:
-        reviewer = r.get('review', {}).get('reviewer', {}).get('session_id')
-        if r['effective_status'] == 'active' and reviewer is not None and reviewer == r['provenance'].get('session_id') and pending(r):
-            items.append(row(r, 'self-reviewed'))
     titles = {}
     for r in live:
         titles.setdefault(' '.join(r['title'].casefold().split()), []).append(r)

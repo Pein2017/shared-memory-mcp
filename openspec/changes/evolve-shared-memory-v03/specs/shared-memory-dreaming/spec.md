@@ -154,7 +154,7 @@ Coverage marks SHALL be submitted as operations of a draft rather than a separat
 
 ### Requirement: Default review objective
 
-When a run is started without a review objective, the system SHALL bind a default objective for the target that inventories, in order: candidates and stale candidates by age, self-reviewed active records not yet re-reviewed by Dreaming, records with identical titles, records whose sources no longer exist, expired active records and unresolved issues; the start response SHALL list those identities so the executor has a concrete deliverable. The default objective SHALL NOT read native history unless the executor adds sources.
+When a run is started without a review objective, the system SHALL bind a default objective for the target that inventories, in order: candidates and stale candidates by age, records with identical titles, records whose sources no longer exist, expired active records and unresolved issues; the start response SHALL list those identities so the executor has a concrete deliverable. The default objective SHALL NOT read native history unless the executor adds sources. Self-reviewed active records SHALL carry their `self-reviewed` assurance label but SHALL NOT be listed as maintenance backlog (user decision 2026-10-13). Root discovery for any objective SHALL inventory only native sessions modified within the last thirty days and SHALL report the number left out as `history_window`; explicitly selected sources SHALL remain reachable regardless of age.
 
 #### Scenario: Start without a question
 - **WHEN** an executor starts a run on a target with twelve candidates and two duplicate titles and no objective

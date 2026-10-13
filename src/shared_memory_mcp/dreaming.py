@@ -86,7 +86,8 @@ def validate_policy(store, policy):
         _keys(profile['budgets'], BUDGET_KEYS, BUDGET_KEYS, 'budgets')
         if any(type(x) is not int or x < 0 for x in profile['budgets'].values()):
             _fail('invalid_policy', 'Budgets must be explicit nonnegative integers')
-        caps = {'source_bytes': 16 * 1048576, 'events': 128, 'operations': 32, 'drafts': 8,
+        # Prefix verification streams whole transcripts (largest Pi sessions ~90 MiB); pages stay capped at 8 MiB.
+        caps = {'source_bytes': 256 * 1048576, 'events': 128, 'operations': 32, 'drafts': 8,
                 'view_chars': 16000, 'view_bytes': 64000, 'seconds': 86400, 'repair_rounds': 8}
         if any(not 1 <= profile['budgets'][k] <= cap for k, cap in caps.items()):
             _fail('invalid_policy', 'A local resource budget exceeds its supported bound')

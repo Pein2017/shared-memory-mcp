@@ -473,7 +473,8 @@ def test_default_inventory_lists_self_review_missing_sources_and_expired(tmp_pat
             return clock.datetime(2100, 1, 1, tzinfo=tz)
     monkeypatch.setattr(core, 'datetime', Later)  # Only the lifecycle clock moves past expiry.
     reasons = {(i['ref'], i['reason']) for i in default_inventory(store, 'demo', {})['items']}
-    assert ('record:' + self_reviewed, 'self-reviewed') in reasons and ('record:' + missing, 'missing-source') in reasons
+    # Self-review is a label on cards, not maintenance backlog (user decision 2A, 2026-10-13).
+    assert not any(ref == 'record:' + self_reviewed for ref, _ in reasons) and ('record:' + missing, 'missing-source') in reasons
     assert ('record:' + expired, 'expired-active') in reasons
 
 
@@ -557,7 +558,7 @@ def test_public_dream_start_without_objective_binds_the_default_inventory(tmp_pa
     caller = {k: engine.caller[k] for k in ('cwd', 'harness', 'session_id', 'actor')}
     started = call(store, 'dream_start', {'caller': caller})
     item = started['item']
-    assert item['review_objective']['id'] == 'default-maintenance'
+    assert item['review_objective']['id'] == 'default-maintenance-v2'
     assert [(i['ref'], i['reason']) for i in item['inventory']['items']] == [('record:' + candidate, 'candidate')]
     assert item['objective_progress']['remaining_sources'] == 0 and by_path(engine, item['run_id']) == {}
     assert started['next'] == {'tool': 'dream_materials', 'args': {'caller': caller, 'run_id': item['run_id'],

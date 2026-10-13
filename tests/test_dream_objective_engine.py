@@ -207,3 +207,49 @@ def test_full_material_continuation_required_to_recover_excerpt_gap(tmp_path, re
             engine.close(run['run_id'], 1, objective_outcome='reviewed')
         assert error.value.code == 'pending_objective'
         assert engine.inspect(run['run_id'])['objective_progress']['remaining_sources'] == 2
+
+
+def test_grant_overlapping_history_root_counts_each_file_once(tmp_path, monkeypatch):
+    import shared_memory_mcp.dream_incremental as incremental
+    engine, store, _, _, _, root = historical_environment(tmp_path)
+    policy = json.loads((store.root / 'dreaming' / 'policy.json').read_text())
+    updated = deepcopy(policy)
+    updated['profiles']['fixture']['source_grants'].append({
+        'id': 'older', 'path': str(root / 'older'), 'kind': 'directory', 'format': 'codex',
+        'schema': 'codex-rollout-v1', 'native_version': 'fixture-v1'})
+    configure_policy(store, updated, expected_revision=_digest(policy))
+    monkeypatch.setattr(incremental, 'MAX_RECORDS', 30)  # 18 unique files, 36 raw listings
+    run = engine.start(review_objective=OBJECTIVE)
+    assert run['objective_progress']['remaining_sources'] == 20
+
+
+def test_large_transcript_page_is_not_charged_twice_against_its_allocation(tmp_path):
+    engine, store, _, _, policy, _, human = environment(tmp_path)
+    rows = [json.loads(row) for row in human.read_text().splitlines()]
+    root = tmp_path / 'native'
+    root.mkdir()
+    body = [rows[0]] + [{**rows[1], 'id': f'big-{i}', 'payload': {**rows[1]['payload'], 'content': [
+        {'type': 'input_text', 'text': f'{i} ' + 'x' * 2000}]}} for i in range(200)]
+    (root / 'big.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in body))
+    updated = deepcopy(policy)
+    updated['profiles']['fixture'].update(read_access='inherited', history_roots=[{
+        'path': str(root), 'format': 'codex', 'schema': 'codex-rollout-v1', 'native_version': 'fixture-v1'}])
+    updated['profiles']['fixture']['budgets'].update(source_bytes=1048576, events=128)
+    configure_policy(store, updated, expected_revision=_digest(policy))
+    run = engine.start(review_objective=OBJECTIVE)
+    events = [e for s in engine.materials(run['run_id'])['sources'].values() for e in s['events'] if e['text'].startswith('0 ')]
+    assert events, 'a 400 KB transcript must stage its first page under a 1 MiB batch budget'
+    from dreaming_helpers import claim, freeze_publish, record_op
+    _, published = freeze_publish(engine, run['run_id'], run['generation'], [record_op('A', claim(events[0]['key'], level='report'))])
+    assert published['status'] == 'applied', published
+
+
+def test_history_discovery_skips_sessions_outside_the_window(tmp_path):
+    import os, time
+    engine, _, _, _, _, root = historical_environment(tmp_path)
+    old = time.time() - 40 * 86400
+    for i in range(5):
+        os.utime(root / 'older' / f'{i:02}.jsonl', (old, old))
+    progress = engine.start(review_objective=OBJECTIVE)['objective_progress']
+    assert progress['remaining_sources'] == 15
+    assert progress['history_window'] == {'days': 30, 'excluded': 5}
