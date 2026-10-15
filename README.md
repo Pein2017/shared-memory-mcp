@@ -1,3 +1,5 @@
+> **Retired (2026-10-15).** This repository is no longer maintained. Cross-harness memory moved to `codex-tools/harnessdeck-memory` (a Markdown vault at `/data/CoordExp/.harnessdeck/memories/`, injected by HarnessDeck). This repo and its store `/data/CoordExp/.shared-memory/` remain read-only as the migration source; automatic extraction is disabled (`extraction.json` `enabled: false`). The unarchived OpenSpec change `evolve-shared-memory-v03` is frozen as-is.
+
 <p align="center"><img src="src/shared_memory_mcp/assets/logo.svg" width="112" alt="Three agents share one Markdown memory" /></p>
 
 # shared-memory-mcp
